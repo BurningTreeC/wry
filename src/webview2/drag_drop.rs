@@ -15,6 +15,7 @@ use std::{
   rc::Rc,
 };
 
+use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2CompositionController3;
 use windows::{
   core::{implement, BOOL},
   Win32::{
@@ -249,6 +250,114 @@ impl IDropTarget_Impl for DragDropTarget_Impl {
         unsafe { DragFinish(hdrop) };
       }
     }
+
+    Ok(())
+  }
+}
+
+// TiddlyDesktop: Composition mode drag-drop target
+// Forwards drag events to ICoreWebView2CompositionController3
+#[implement(IDropTarget)]
+pub struct CompositionDragDropTarget {
+  hwnd: HWND,
+  composition_controller: ICoreWebView2CompositionController3,
+}
+
+impl CompositionDragDropTarget {
+  pub fn new(hwnd: HWND, composition_controller: ICoreWebView2CompositionController3) -> Self {
+    Self {
+      hwnd,
+      composition_controller,
+    }
+  }
+
+  /// Register this drop target on the given HWND
+  pub fn register(hwnd: HWND, composition_controller: ICoreWebView2CompositionController3) -> windows::core::Result<IDropTarget> {
+    let drop_target: IDropTarget = Self::new(hwnd, composition_controller).into();
+    unsafe { RegisterDragDrop(hwnd, &drop_target)? };
+    Ok(drop_target)
+  }
+}
+
+#[allow(non_snake_case)]
+impl IDropTarget_Impl for CompositionDragDropTarget_Impl {
+  fn DragEnter(
+    &self,
+    pDataObj: windows_core::Ref<'_, IDataObject>,
+    grfKeyState: MODIFIERKEYS_FLAGS,
+    pt: &POINTL,
+    pdwEffect: *mut DROPEFFECT,
+  ) -> windows::core::Result<()> {
+    let mut point = POINT { x: pt.x, y: pt.y };
+    let _ = unsafe { ScreenToClient(self.hwnd, &mut point) };
+
+    // Forward to composition controller
+    let mut effect = unsafe { (*pdwEffect).0 };
+    let data_obj = pDataObj.as_ref().expect("Received null IDataObject");
+    let _ = unsafe {
+      self.composition_controller.DragEnter(
+        data_obj,
+        grfKeyState.0 as u32,
+        point,
+        &mut effect,
+      )
+    };
+    unsafe { (*pdwEffect).0 = effect };
+
+    Ok(())
+  }
+
+  fn DragOver(
+    &self,
+    grfKeyState: MODIFIERKEYS_FLAGS,
+    pt: &POINTL,
+    pdwEffect: *mut DROPEFFECT,
+  ) -> windows::core::Result<()> {
+    let mut point = POINT { x: pt.x, y: pt.y };
+    let _ = unsafe { ScreenToClient(self.hwnd, &mut point) };
+
+    // Forward to composition controller
+    let mut effect = unsafe { (*pdwEffect).0 };
+    let _ = unsafe {
+      self.composition_controller.DragOver(
+        grfKeyState.0 as u32,
+        point,
+        &mut effect,
+      )
+    };
+    unsafe { (*pdwEffect).0 = effect };
+
+    Ok(())
+  }
+
+  fn DragLeave(&self) -> windows::core::Result<()> {
+    // Forward to composition controller
+    let _ = unsafe { self.composition_controller.DragLeave() };
+    Ok(())
+  }
+
+  fn Drop(
+    &self,
+    pDataObj: windows_core::Ref<'_, IDataObject>,
+    grfKeyState: MODIFIERKEYS_FLAGS,
+    pt: &POINTL,
+    pdwEffect: *mut DROPEFFECT,
+  ) -> windows::core::Result<()> {
+    let mut point = POINT { x: pt.x, y: pt.y };
+    let _ = unsafe { ScreenToClient(self.hwnd, &mut point) };
+
+    // Forward to composition controller
+    let mut effect = unsafe { (*pdwEffect).0 };
+    let data_obj = pDataObj.as_ref().expect("Received null IDataObject");
+    let _ = unsafe {
+      self.composition_controller.Drop(
+        data_obj,
+        grfKeyState.0 as u32,
+        point,
+        &mut effect,
+      )
+    };
+    unsafe { (*pdwEffect).0 = effect };
 
     Ok(())
   }

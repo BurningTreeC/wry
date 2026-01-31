@@ -47,7 +47,7 @@ use windows::{
   },
 };
 
-use self::drag_drop::DragDropController;
+use self::drag_drop::{CompositionDragDropTarget, DragDropController};
 use super::Theme;
 use crate::{
   custom_protocol_workaround, proxy::ProxyConfig, Error, MemoryUsageLevel, NewWindowFeatures,
@@ -100,11 +100,18 @@ pub(crate) struct InnerWebView {
   // the webview gets dropped, otherwise we'll have a memory leak
   #[allow(dead_code)]
   drag_drop_controller: Option<DragDropController>,
+  // TiddlyDesktop: Composition mode drop target - must be kept alive
+  #[allow(dead_code)]
+  composition_drop_target: Option<windows::Win32::System::Ole::IDropTarget>,
 }
 
 impl Drop for InnerWebView {
   fn drop(&mut self) {
     let _ = unsafe { self.controller.Close() };
+    // TiddlyDesktop: Revoke drag-drop registration before destroying window
+    if self.composition_drop_target.is_some() {
+      let _ = unsafe { windows::Win32::System::Ole::RevokeDragDrop(self.hwnd) };
+    }
     // TiddlyDesktop: Detach container input subclass before destroying window
     unsafe { Self::dettach_container_input_subclass(self.hwnd) };
     if self.is_child {
@@ -188,12 +195,21 @@ impl InnerWebView {
 
     // TiddlyDesktop: Enable external drops - drag-drop is handled via composition controller forwarding
     let drag_drop_controller: Option<DragDropController> = {
-      let _ = drop_handler; // Not used - we handle drag-drop via IDropTarget on parent
+      let _ = drop_handler; // Not used - we handle drag-drop via IDropTarget on hwnd
       unsafe {
         let _ = controller
           .cast::<ICoreWebView2Controller4>()
           .and_then(|c| c.SetAllowExternalDrop(true));
       }
+      None
+    };
+
+    // TiddlyDesktop: Register composition drag-drop target on hwnd
+    let composition_drop_target = if let Some(ref comp_ctrl) = composition_controller {
+      comp_ctrl.cast::<ICoreWebView2CompositionController3>().ok().and_then(|ctrl3| {
+        CompositionDragDropTarget::register(hwnd, ctrl3).ok()
+      })
+    } else {
       None
     };
 
@@ -295,6 +311,7 @@ impl InnerWebView {
       dcomp_visual,
       env_for_pointer,
       drag_drop_controller,
+      composition_drop_target,
     };
 
     if is_child {
