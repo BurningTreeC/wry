@@ -87,6 +87,11 @@ pub(crate) struct InnerWebView {
   composition_controller: Option<ICoreWebView2CompositionController>,
   #[allow(dead_code)]
   dcomp_device: Option<IDCompositionDevice>,
+  // TiddlyDesktop: Must keep target and visual alive for DirectComposition to render
+  #[allow(dead_code)]
+  dcomp_target: Option<IDCompositionTarget>,
+  #[allow(dead_code)]
+  dcomp_visual: Option<IDCompositionVisual>,
   #[allow(dead_code)]
   env_for_pointer: Option<ICoreWebView2Environment3>,
   // Store FileDropController in here to make sure it gets dropped when
@@ -164,7 +169,7 @@ impl InnerWebView {
       Self::create_environment(&attributes, pl_attrs.clone())?
     };
     // TiddlyDesktop: Use composition hosting for full input/drag-drop control
-    let (controller, composition_controller, dcomp_device, env_for_pointer) =
+    let (controller, composition_controller, dcomp_device, dcomp_target, dcomp_visual, env_for_pointer) =
       Self::create_composition_controller(hwnd, &env, attributes.incognito, background_color)?;
     let webview = Self::init_webview(
       parent,
@@ -277,6 +282,8 @@ impl InnerWebView {
       env,
       composition_controller,
       dcomp_device,
+      dcomp_target,
+      dcomp_visual,
       env_for_pointer,
       drag_drop_controller,
     };
@@ -537,6 +544,8 @@ impl InnerWebView {
     ICoreWebView2Controller,
     Option<ICoreWebView2CompositionController>,
     Option<IDCompositionDevice>,
+    Option<IDCompositionTarget>,
+    Option<IDCompositionVisual>,
     Option<ICoreWebView2Environment3>,
   )> {
     // Create D3D11 device for DirectComposition
@@ -621,6 +630,8 @@ impl InnerWebView {
       controller,
       Some(composition_controller),
       Some(dcomp_device),
+      Some(target),
+      Some(visual),
       Some(env_for_pointer),
     ))
   }
