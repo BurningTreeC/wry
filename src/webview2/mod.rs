@@ -20,9 +20,24 @@ use windows::{
   Win32::{
     Foundation::*,
     Globalization::*,
-    Graphics::Gdi::*,
+    Graphics::{
+      Gdi::*,
+      // TiddlyDesktop: DirectComposition for composition hosting
+      Direct3D::D3D_DRIVER_TYPE_HARDWARE,
+      Direct3D11::{D3D11CreateDevice, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION},
+      DirectComposition::{DCompositionCreateDevice, IDCompositionDevice, IDCompositionTarget, IDCompositionVisual},
+      Dxgi::IDXGIDevice,
+    },
     System::{Com::*, LibraryLoader::GetModuleHandleW},
-    UI::{Input::KeyboardAndMouse::SetFocus, Shell::*, WindowsAndMessaging::*},
+    UI::{
+      Input::{
+        KeyboardAndMouse::SetFocus,
+        // TiddlyDesktop: Pointer events for touch/pen support
+        Pointer::{GetPointerInfo, POINTER_INFO},
+      },
+      Shell::*,
+      WindowsAndMessaging::*,
+    },
   },
 };
 
@@ -61,6 +76,13 @@ pub(crate) struct InnerWebView {
   pub controller: ICoreWebView2Controller,
   pub webview: ICoreWebView2,
   pub env: ICoreWebView2Environment,
+  // TiddlyDesktop: Composition hosting fields for input/drag-drop control
+  #[allow(dead_code)]
+  composition_controller: Option<ICoreWebView2CompositionController>,
+  #[allow(dead_code)]
+  dcomp_device: Option<IDCompositionDevice>,
+  #[allow(dead_code)]
+  env_for_pointer: Option<ICoreWebView2Environment3>,
   // Store FileDropController in here to make sure it gets dropped when
   // the webview gets dropped, otherwise we'll have a memory leak
   #[allow(dead_code)]
@@ -135,7 +157,9 @@ impl InnerWebView {
     } else {
       Self::create_environment(&attributes, pl_attrs.clone())?
     };
-    let controller = Self::create_controller(hwnd, &env, attributes.incognito, background_color)?;
+    // TiddlyDesktop: Use composition hosting for full input/drag-drop control
+    let (controller, composition_controller, dcomp_device, env_for_pointer) =
+      Self::create_composition_controller(hwnd, &env, attributes.incognito, background_color)?;
     let webview = Self::init_webview(
       parent,
       hwnd,
@@ -147,15 +171,16 @@ impl InnerWebView {
       is_child,
     )?;
 
-    let drag_drop_controller = drop_handler.map(|handler| {
-      // Disable file drops, so our handler can capture it
+    // TiddlyDesktop: Enable external drops - drag-drop is handled via composition controller forwarding
+    let drag_drop_controller: Option<DragDropController> = {
+      let _ = drop_handler; // Not used - we handle drag-drop via IDropTarget on parent
       unsafe {
         let _ = controller
           .cast::<ICoreWebView2Controller4>()
-          .and_then(|c| c.SetAllowExternalDrop(false));
+          .and_then(|c| c.SetAllowExternalDrop(true));
       }
-      DragDropController::new(hwnd, handler)
-    });
+      None
+    };
 
     let w = Self {
       id,
@@ -165,6 +190,9 @@ impl InnerWebView {
       is_child,
       webview,
       env,
+      composition_controller,
+      dcomp_device,
+      env_for_pointer,
       drag_drop_controller,
     };
 
@@ -409,6 +437,117 @@ impl InnerWebView {
     }
 
     webview2_com::wait_with_pump(rx)?.map_err(Into::into)
+  }
+
+  // TiddlyDesktop: Create composition controller for full input/drag-drop control
+  #[inline]
+  fn create_composition_controller(
+    hwnd: HWND,
+    env: &ICoreWebView2Environment,
+    incognito: bool,
+    background_color: Option<(u8, u8, u8, u8)>,
+  ) -> Result<(
+    ICoreWebView2Controller,
+    Option<ICoreWebView2CompositionController>,
+    Option<IDCompositionDevice>,
+    Option<ICoreWebView2Environment3>,
+  )> {
+    // Create D3D11 device for DirectComposition
+    let d3d_device = unsafe {
+      let mut device = None;
+      D3D11CreateDevice(
+        None,
+        D3D_DRIVER_TYPE_HARDWARE,
+        HMODULE::default(),
+        D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+        None,
+        D3D11_SDK_VERSION,
+        Some(&mut device),
+        None,
+        None,
+      )?;
+      device.ok_or_else(|| windows::core::Error::from(E_FAIL))?
+    };
+
+    // Get DXGI device and create DirectComposition device
+    let dxgi_device: IDXGIDevice = d3d_device.cast()?;
+    let dcomp_device: IDCompositionDevice = unsafe { DCompositionCreateDevice(&dxgi_device)? };
+
+    // Create visual and target
+    let visual: IDCompositionVisual = unsafe { dcomp_device.CreateVisual()? };
+    let target: IDCompositionTarget = unsafe { dcomp_device.CreateTargetForHwnd(hwnd, true)? };
+    unsafe { target.SetRoot(&visual)? };
+
+    // Create composition controller
+    let (tx, rx) = mpsc::channel();
+    let env3: ICoreWebView2Environment3 = env.cast()?;
+    let env10 = env.cast::<ICoreWebView2Environment10>();
+
+    let handler = CreateCoreWebView2CompositionControllerCompletedHandler::create(Box::new(
+      move |error_code, controller| {
+        error_code?;
+        tx.send(controller.ok_or_else(|| windows::core::Error::from(E_POINTER)))
+          .map_err(|_| windows::core::Error::from(E_UNEXPECTED))
+      },
+    ));
+
+    unsafe {
+      if let Ok(env10) = env10 {
+        let controller_opts = env10.CreateCoreWebView2ControllerOptions()?;
+        if let Some((r, g, b, mut a)) = background_color {
+          if let Ok(opts3) = controller_opts.cast::<ICoreWebView2ControllerOptions3>() {
+            if a != 0 {
+              a = 255;
+            }
+            opts3.SetDefaultBackgroundColor(COREWEBVIEW2_COLOR {
+              R: r,
+              G: g,
+              B: b,
+              A: a,
+            })?;
+          }
+        }
+        controller_opts.SetIsInPrivateModeEnabled(incognito)?;
+        env10.CreateCoreWebView2CompositionControllerWithOptions(hwnd, &controller_opts, &handler)?;
+      } else {
+        env3.CreateCoreWebView2CompositionController(hwnd, &handler)?;
+      }
+    }
+
+    let composition_controller: ICoreWebView2CompositionController =
+      webview2_com::wait_with_pump(rx)?
+        .map_err(|e: windows::core::Error| Error::from(e))?;
+
+    // Set the visual as root and commit
+    unsafe {
+      composition_controller.SetRootVisualTarget(&visual)?;
+      dcomp_device.Commit()?;
+    }
+
+    // Get regular controller interface
+    let controller: ICoreWebView2Controller = composition_controller.cast()?;
+
+    // Store env3 for creating pointer info objects
+    let env_for_pointer: ICoreWebView2Environment3 = env.cast()?;
+
+    Ok((
+      controller,
+      Some(composition_controller),
+      Some(dcomp_device),
+      Some(env_for_pointer),
+    ))
+  }
+
+  // TiddlyDesktop: Expose composition controller for drag-drop forwarding
+  #[allow(dead_code)]
+  pub fn composition_controller(&self) -> Option<&ICoreWebView2CompositionController> {
+    self.composition_controller.as_ref()
+  }
+
+  // TiddlyDesktop: Expose environment for creating pointer info objects
+  #[allow(dead_code)]
+  pub fn env_for_pointer(&self) -> Option<&ICoreWebView2Environment3> {
+    self.env_for_pointer.as_ref()
   }
 
   #[allow(clippy::too_many_arguments)]
@@ -1208,6 +1347,148 @@ impl InnerWebView {
     _uidsubclass: usize,
     dwrefdata: usize,
   ) -> LRESULT {
+    // TiddlyDesktop: Pointer message constants for touch/pen/stylus support
+    const WM_POINTERACTIVATE: u32 = 0x024B;
+    const WM_POINTERDOWN: u32 = 0x0246;
+    const WM_POINTERUP: u32 = 0x0247;
+    const WM_POINTERUPDATE: u32 = 0x0245;
+    const WM_POINTERENTER: u32 = 0x0249;
+    const WM_POINTERLEAVE: u32 = 0x024A;
+    const WM_POINTERCAPTURECHANGED: u32 = 0x024C;
+    const WM_POINTERWHEEL: u32 = 0x024E;
+    const WM_POINTERHWHEEL: u32 = 0x024F;
+
+    // Pointer type constants (i32 to match POINTER_INPUT_TYPE)
+    const PT_TOUCH: i32 = 2;
+    const PT_PEN: i32 = 3;
+    const PT_MOUSE: i32 = 4;
+
+    // Mouse tracking constants (may not be in windows crate glob)
+    const TD_WM_MOUSELEAVE: u32 = 0x02A3;
+    const TD_WM_SETCURSOR: u32 = 0x0020;
+
+    // TiddlyDesktop: Forward pointer events to composition controller (touch/pen/stylus)
+    match msg {
+      WM_POINTERACTIVATE | WM_POINTERDOWN | WM_POINTERUP | WM_POINTERUPDATE |
+      WM_POINTERENTER | WM_POINTERLEAVE | WM_POINTERCAPTURECHANGED |
+      WM_POINTERWHEEL | WM_POINTERHWHEEL => {
+        if dwrefdata != 0 {
+          let controller = dwrefdata as *mut ICoreWebView2Controller;
+          if let Ok(comp_ctrl) = (*controller).cast::<ICoreWebView2CompositionController>() {
+            // Get pointer ID from LOWORD of wParam
+            let pointer_id = (wparam.0 & 0xFFFF) as u32;
+
+            // Get pointer info from Windows
+            let mut pointer_info: POINTER_INFO = std::mem::zeroed();
+            if GetPointerInfo(pointer_id, &mut pointer_info).is_ok() {
+              // Convert pointer events to mouse events for basic touch/pen functionality
+              let pointer_type = pointer_info.pointerType.0;
+              if pointer_type == PT_TOUCH || pointer_type == PT_PEN || pointer_type == PT_MOUSE {
+                let mouse_event = match msg {
+                  WM_POINTERDOWN => COREWEBVIEW2_MOUSE_EVENT_KIND_LEFT_BUTTON_DOWN,
+                  WM_POINTERUP => COREWEBVIEW2_MOUSE_EVENT_KIND_LEFT_BUTTON_UP,
+                  WM_POINTERUPDATE => COREWEBVIEW2_MOUSE_EVENT_KIND_MOVE,
+                  WM_POINTERENTER => COREWEBVIEW2_MOUSE_EVENT_KIND_MOVE,
+                  WM_POINTERLEAVE => COREWEBVIEW2_MOUSE_EVENT_KIND_LEAVE,
+                  WM_POINTERWHEEL => COREWEBVIEW2_MOUSE_EVENT_KIND_WHEEL,
+                  WM_POINTERHWHEEL => COREWEBVIEW2_MOUSE_EVENT_KIND_HORIZONTAL_WHEEL,
+                  _ => COREWEBVIEW2_MOUSE_EVENT_KIND_MOVE,
+                };
+
+                // Convert screen coordinates to client coordinates
+                let mut pt = pointer_info.ptPixelLocation;
+                let _ = ScreenToClient(hwnd, &mut pt);
+
+                let virtual_keys = COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS(0);
+                let mouse_data = if msg == WM_POINTERWHEEL || msg == WM_POINTERHWHEEL {
+                  ((wparam.0 >> 16) & 0xFFFF) as u32
+                } else {
+                  0
+                };
+
+                let _ = comp_ctrl.SendMouseInput(mouse_event, virtual_keys, mouse_data, pt);
+              }
+            }
+          }
+        }
+      }
+      _ => {}
+    }
+
+    // TiddlyDesktop: Forward mouse events to composition controller
+    match msg {
+      WM_LBUTTONDOWN | WM_LBUTTONUP | WM_RBUTTONDOWN | WM_RBUTTONUP |
+      WM_MBUTTONDOWN | WM_MBUTTONUP | WM_MOUSEMOVE | WM_MOUSEWHEEL |
+      WM_XBUTTONDOWN | WM_XBUTTONUP | WM_LBUTTONDBLCLK | WM_RBUTTONDBLCLK |
+      WM_MBUTTONDBLCLK | WM_XBUTTONDBLCLK | WM_MOUSEHWHEEL => {
+        if dwrefdata != 0 {
+          let controller = dwrefdata as *mut ICoreWebView2Controller;
+          if let Ok(comp_ctrl) = (*controller).cast::<ICoreWebView2CompositionController>() {
+            let event_kind = match msg {
+              WM_LBUTTONDOWN => COREWEBVIEW2_MOUSE_EVENT_KIND_LEFT_BUTTON_DOWN,
+              WM_LBUTTONUP => COREWEBVIEW2_MOUSE_EVENT_KIND_LEFT_BUTTON_UP,
+              WM_LBUTTONDBLCLK => COREWEBVIEW2_MOUSE_EVENT_KIND_LEFT_BUTTON_DOUBLE_CLICK,
+              WM_RBUTTONDOWN => COREWEBVIEW2_MOUSE_EVENT_KIND_RIGHT_BUTTON_DOWN,
+              WM_RBUTTONUP => COREWEBVIEW2_MOUSE_EVENT_KIND_RIGHT_BUTTON_UP,
+              WM_RBUTTONDBLCLK => COREWEBVIEW2_MOUSE_EVENT_KIND_RIGHT_BUTTON_DOUBLE_CLICK,
+              WM_MBUTTONDOWN => COREWEBVIEW2_MOUSE_EVENT_KIND_MIDDLE_BUTTON_DOWN,
+              WM_MBUTTONUP => COREWEBVIEW2_MOUSE_EVENT_KIND_MIDDLE_BUTTON_UP,
+              WM_MBUTTONDBLCLK => COREWEBVIEW2_MOUSE_EVENT_KIND_MIDDLE_BUTTON_DOUBLE_CLICK,
+              WM_MOUSEMOVE => COREWEBVIEW2_MOUSE_EVENT_KIND_MOVE,
+              WM_MOUSEWHEEL => COREWEBVIEW2_MOUSE_EVENT_KIND_WHEEL,
+              WM_MOUSEHWHEEL => COREWEBVIEW2_MOUSE_EVENT_KIND_HORIZONTAL_WHEEL,
+              WM_XBUTTONDOWN => COREWEBVIEW2_MOUSE_EVENT_KIND_X_BUTTON_DOWN,
+              WM_XBUTTONUP => COREWEBVIEW2_MOUSE_EVENT_KIND_X_BUTTON_UP,
+              WM_XBUTTONDBLCLK => COREWEBVIEW2_MOUSE_EVENT_KIND_X_BUTTON_DOUBLE_CLICK,
+              _ => COREWEBVIEW2_MOUSE_EVENT_KIND_MOVE,
+            };
+
+            let virtual_keys = COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS((wparam.0 & 0xFF) as i32);
+            let mouse_data = if msg == WM_MOUSEWHEEL || msg == WM_MOUSEHWHEEL {
+              ((wparam.0 >> 16) & 0xFFFF) as u32
+            } else if msg == WM_XBUTTONDOWN || msg == WM_XBUTTONUP || msg == WM_XBUTTONDBLCLK {
+              ((wparam.0 >> 16) & 0xFFFF) as u32
+            } else {
+              0
+            };
+
+            let x = (lparam.0 & 0xFFFF) as i16 as i32;
+            let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+            let point = POINT { x, y };
+
+            let _ = comp_ctrl.SendMouseInput(event_kind, virtual_keys, mouse_data, point);
+          }
+        }
+      }
+      TD_WM_MOUSELEAVE => {
+        if dwrefdata != 0 {
+          let controller = dwrefdata as *mut ICoreWebView2Controller;
+          if let Ok(comp_ctrl) = (*controller).cast::<ICoreWebView2CompositionController>() {
+            let _ = comp_ctrl.SendMouseInput(
+              COREWEBVIEW2_MOUSE_EVENT_KIND_LEAVE,
+              COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS(0),
+              0,
+              POINT { x: 0, y: 0 },
+            );
+          }
+        }
+      }
+      TD_WM_SETCURSOR => {
+        // TiddlyDesktop: Let composition controller handle cursor changes
+        if dwrefdata != 0 {
+          let controller = dwrefdata as *mut ICoreWebView2Controller;
+          if let Ok(comp_ctrl) = (*controller).cast::<ICoreWebView2CompositionController>() {
+            let mut cursor = HCURSOR::default();
+            if comp_ctrl.Cursor(&mut cursor).is_ok() {
+              SetCursor(Some(cursor));
+              return LRESULT(1); // Indicate we handled cursor
+            }
+          }
+        }
+      }
+      _ => {}
+    }
+
     match msg {
       WM_SIZE => {
         if wparam.0 != SIZE_MINIMIZED as usize {

@@ -103,15 +103,29 @@ pub(crate) fn connect_drag_event(webview: &WebView, handler: Box<dyn Fn(DragDrop
 
   {
     let controller = controller.clone();
-    webview.connect_drag_drop(move |_, ctx, x, y, time| {
+    webview.connect_drag_drop(move |_, ctx, x, y, _time| {
+      // TiddlyDesktop: Let WebKit handle ALL drops natively
+      // This preserves text insertion into inputs/textareas/contenteditables
+      // for both internal AND external drops.
+      // We still emit the Tauri event for external file drops so JS can handle them,
+      // but we return false so WebKit also processes the drop.
+
+      // For internal drops, just let WebKit handle
+      if ctx.drag_get_source_widget().is_some() {
+        return false;
+      }
+
+      // For external drops with file paths, emit the event but still return false
       if controller.state() == DragControllerState::Leaving {
         if let Some(paths) = controller.take_paths() {
-          ctx.drop_finish(true, time);
           controller.leave();
-          return controller.call(DragDropEvent::Drop {
+          // Emit the event so JS knows about the drop
+          controller.call(DragDropEvent::Drop {
             paths,
             position: (x, y),
           });
+          // But return false so WebKit also handles it natively
+          return false;
         }
       }
 
