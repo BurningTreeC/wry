@@ -1747,11 +1747,12 @@ impl InnerWebView {
     // TiddlyDesktop: Keyboard event handling
     // In composition hosting mode, keyboard events need to be forwarded to the WebView2's
     // internal Chrome_WidgetWin window for processing
+    // Only forward from container subclass
     match msg {
       WM_KEYDOWN | WM_KEYUP | WM_CHAR | WM_DEADCHAR |
       WM_SYSKEYDOWN | WM_SYSKEYUP | WM_SYSCHAR | WM_SYSDEADCHAR |
       WM_UNICHAR => {
-        if dwrefdata != 0 {
+        if is_container_subclass && dwrefdata != 0 {
           let controller = dwrefdata as *mut ICoreWebView2Controller;
           // Ensure WebView2 has focus
           let _ = (*controller).MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
@@ -1791,17 +1792,19 @@ impl InnerWebView {
     }
 
     // TiddlyDesktop: Touch gesture handling (pinch-to-zoom, pan, rotate)
+    // Only handle from container subclass
     match msg {
       WM_GESTURE => {
         // Forward gesture messages to WebView2
         // WebView2 handles gestures internally when it has focus
-        if dwrefdata != 0 {
+        if is_container_subclass && dwrefdata != 0 {
           let controller = dwrefdata as *mut ICoreWebView2Controller;
           let _ = (*controller).MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
         }
       }
       WM_GESTURENOTIFY => {
         // Respond to gesture notification - WebView2 will handle gesture configuration
+        // Only handle from container subclass
         // Return DefSubclassProc to allow default gesture handling
       }
       WM_TOUCH => {
@@ -1813,10 +1816,11 @@ impl InnerWebView {
     }
 
     // TiddlyDesktop: Mouse capture handling
+    // Only handle from container subclass
     match msg {
       WM_CAPTURECHANGED => {
         // Mouse capture changed - WebView2 needs to know
-        if dwrefdata != 0 {
+        if is_container_subclass && dwrefdata != 0 {
           let controller = dwrefdata as *mut ICoreWebView2Controller;
           if let Ok(comp_ctrl) = (*controller).cast::<ICoreWebView2CompositionController>() {
             // Send a mouse leave to reset state when capture is lost
@@ -1849,11 +1853,12 @@ impl InnerWebView {
     }
 
     // TiddlyDesktop: Context menu handling
+    // Only handle from container subclass
     match msg {
       WM_CONTEXTMENU => {
         // Context menu request - WebView2 handles its own context menu
         // via the ContextMenuRequested event, so we let it pass through
-        if dwrefdata != 0 {
+        if is_container_subclass && dwrefdata != 0 {
           let controller = dwrefdata as *mut ICoreWebView2Controller;
           let _ = (*controller).MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
         }
@@ -1918,7 +1923,8 @@ impl InnerWebView {
       }
       WM_MOUSEACTIVATE => {
         // Mouse click activation - ensure WebView2 gets focus
-        if dwrefdata != 0 {
+        // Only handle from container subclass
+        if is_container_subclass && dwrefdata != 0 {
           let controller = dwrefdata as *mut ICoreWebView2Controller;
           let _ = (*controller).MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
         }
@@ -1927,16 +1933,19 @@ impl InnerWebView {
     }
 
     // TiddlyDesktop: Enable mouse tracking for WM_MOUSELEAVE events
+    // Only track from container subclass
     match msg {
       WM_MOUSEMOVE => {
-        // Request mouse leave notification when mouse exits window
-        let mut tme = TRACKMOUSEEVENT {
-          cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
-          dwFlags: TME_LEAVE,
-          hwndTrack: hwnd,
-          dwHoverTime: 0,
-        };
-        let _ = TrackMouseEvent(&mut tme);
+        if is_container_subclass {
+          // Request mouse leave notification when mouse exits window
+          let mut tme = TRACKMOUSEEVENT {
+            cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+            dwFlags: TME_LEAVE,
+            hwndTrack: hwnd,
+            dwHoverTime: 0,
+          };
+          let _ = TrackMouseEvent(&mut tme);
+        }
       }
       _ => {}
     }
