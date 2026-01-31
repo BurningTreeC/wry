@@ -39,6 +39,9 @@ pub(crate) struct InnerWebView {
   // Composition hosting fields
   composition_controller: Option<ICoreWebView2CompositionController>,
   dcomp_device: Option<IDCompositionDevice>,
+  // CRITICAL: Must keep target and visual alive for DirectComposition to render
+  dcomp_target: Option<IDCompositionTarget>,
+  dcomp_visual: Option<IDCompositionVisual>,
   env_for_pointer: Option<ICoreWebView2Environment3>,
 
   // ... rest of fields ...
