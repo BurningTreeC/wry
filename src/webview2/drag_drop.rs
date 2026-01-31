@@ -101,6 +101,17 @@ impl DragDropTarget {
 
   unsafe fn iterate_filenames<F>(
     data_obj: windows_core::Ref<'_, IDataObject>,
+    callback: F,
+  ) -> Option<HDROP>
+  where
+    F: FnMut(PathBuf),
+  {
+    Self::iterate_filenames_ref(data_obj.as_ref().expect("Received null IDataObject"), callback)
+  }
+
+  /// Helper that takes &IDataObject directly, for use when we need to reuse the data object
+  unsafe fn iterate_filenames_ref<F>(
+    data_obj: &IDataObject,
     mut callback: F,
   ) -> Option<HDROP>
   where
@@ -114,10 +125,7 @@ impl DragDropTarget {
       tymed: TYMED_HGLOBAL.0 as u32,
     };
 
-    match data_obj
-      .as_ref()
-      .expect("Received null IDataObject")
-      .GetData(&drop_format)
+    match data_obj.GetData(&drop_format)
     {
       Ok(medium) => {
         let hdrop = HDROP(medium.u.hGlobal.0 as _);
@@ -256,24 +264,38 @@ impl IDropTarget_Impl for DragDropTarget_Impl {
 }
 
 // TiddlyDesktop: Composition mode drag-drop target
-// Forwards drag events to ICoreWebView2CompositionController3
+// Forwards drag events to ICoreWebView2CompositionController3 AND extracts file paths for listener
 #[implement(IDropTarget)]
 pub struct CompositionDragDropTarget {
   hwnd: HWND,
   composition_controller: ICoreWebView2CompositionController3,
+  listener: Rc<dyn Fn(DragDropEvent) -> bool>,
+  cursor_effect: UnsafeCell<DROPEFFECT>,
+  enter_is_valid: UnsafeCell<bool>,
 }
 
 impl CompositionDragDropTarget {
-  pub fn new(hwnd: HWND, composition_controller: ICoreWebView2CompositionController3) -> Self {
+  pub fn new(
+    hwnd: HWND,
+    composition_controller: ICoreWebView2CompositionController3,
+    listener: Rc<dyn Fn(DragDropEvent) -> bool>,
+  ) -> Self {
     Self {
       hwnd,
       composition_controller,
+      listener,
+      cursor_effect: DROPEFFECT_NONE.into(),
+      enter_is_valid: false.into(),
     }
   }
 
   /// Register this drop target on the given HWND
-  pub fn register(hwnd: HWND, composition_controller: ICoreWebView2CompositionController3) -> windows::core::Result<IDropTarget> {
-    let drop_target: IDropTarget = Self::new(hwnd, composition_controller).into();
+  pub fn register(
+    hwnd: HWND,
+    composition_controller: ICoreWebView2CompositionController3,
+    handler: Box<dyn Fn(DragDropEvent) -> bool>,
+  ) -> windows::core::Result<IDropTarget> {
+    let drop_target: IDropTarget = Self::new(hwnd, composition_controller, Rc::new(handler)).into();
     unsafe { RegisterDragDrop(hwnd, &drop_target)? };
     Ok(drop_target)
   }
@@ -291,9 +313,28 @@ impl IDropTarget_Impl for CompositionDragDropTarget_Impl {
     let mut point = POINT { x: pt.x, y: pt.y };
     let _ = unsafe { ScreenToClient(self.hwnd, &mut point) };
 
-    // Forward to composition controller
-    let mut effect = unsafe { (*pdwEffect).0 };
+    // Get reference to data object (needed for both path extraction and forwarding)
     let data_obj = pDataObj.as_ref().expect("Received null IDataObject");
+
+    // Extract file paths for listener (use iterate_filenames_ref since we need to reuse data_obj)
+    let mut paths = Vec::new();
+    let hdrop = unsafe { DragDropTarget::iterate_filenames_ref(data_obj, |path| paths.push(path)) };
+    let enter_is_valid = hdrop.is_some();
+
+    unsafe {
+      *self.enter_is_valid.get() = enter_is_valid;
+    }
+
+    // Call listener with Enter event (only if we have valid file paths)
+    if enter_is_valid {
+      (self.listener)(DragDropEvent::Enter {
+        paths,
+        position: (point.x as _, point.y as _),
+      });
+    }
+
+    // Forward to composition controller for HTML5 drag events
+    let mut effect = unsafe { (*pdwEffect).0 };
     let _ = unsafe {
       self.composition_controller.DragEnter(
         data_obj,
@@ -302,7 +343,17 @@ impl IDropTarget_Impl for CompositionDragDropTarget_Impl {
         &mut effect,
       )
     };
-    unsafe { (*pdwEffect).0 = effect };
+
+    // Use composition controller's effect, but ensure copy is allowed for files
+    let cursor_effect = if enter_is_valid {
+      DROPEFFECT_COPY
+    } else {
+      DROPEFFECT(effect)
+    };
+    unsafe {
+      (*pdwEffect) = cursor_effect;
+      *self.cursor_effect.get() = cursor_effect;
+    }
 
     Ok(())
   }
@@ -316,6 +367,13 @@ impl IDropTarget_Impl for CompositionDragDropTarget_Impl {
     let mut point = POINT { x: pt.x, y: pt.y };
     let _ = unsafe { ScreenToClient(self.hwnd, &mut point) };
 
+    // Call listener with Over event
+    if unsafe { *self.enter_is_valid.get() } {
+      (self.listener)(DragDropEvent::Over {
+        position: (point.x as _, point.y as _),
+      });
+    }
+
     // Forward to composition controller
     let mut effect = unsafe { (*pdwEffect).0 };
     let _ = unsafe {
@@ -325,12 +383,19 @@ impl IDropTarget_Impl for CompositionDragDropTarget_Impl {
         &mut effect,
       )
     };
-    unsafe { (*pdwEffect).0 = effect };
+
+    // Use our cached cursor effect for files
+    unsafe { *pdwEffect = *self.cursor_effect.get() };
 
     Ok(())
   }
 
   fn DragLeave(&self) -> windows::core::Result<()> {
+    // Call listener with Leave event
+    if unsafe { *self.enter_is_valid.get() } {
+      (self.listener)(DragDropEvent::Leave);
+    }
+
     // Forward to composition controller
     let _ = unsafe { self.composition_controller.DragLeave() };
     Ok(())
@@ -346,9 +411,28 @@ impl IDropTarget_Impl for CompositionDragDropTarget_Impl {
     let mut point = POINT { x: pt.x, y: pt.y };
     let _ = unsafe { ScreenToClient(self.hwnd, &mut point) };
 
-    // Forward to composition controller
-    let mut effect = unsafe { (*pdwEffect).0 };
+    // Get reference to data object (needed for both path extraction and forwarding)
     let data_obj = pDataObj.as_ref().expect("Received null IDataObject");
+
+    // Extract file paths and call listener BEFORE forwarding to WebView2
+    // This ensures TiddlyDesktop has the paths available when the HTML5 drop event fires
+    if unsafe { *self.enter_is_valid.get() } {
+      let mut paths = Vec::new();
+      let hdrop = unsafe { DragDropTarget::iterate_filenames_ref(data_obj, |path| paths.push(path)) };
+
+      // Call listener with Drop event
+      (self.listener)(DragDropEvent::Drop {
+        paths,
+        position: (point.x as _, point.y as _),
+      });
+
+      if let Some(hdrop) = hdrop {
+        unsafe { DragFinish(hdrop) };
+      }
+    }
+
+    // Forward to composition controller for HTML5 drop event
+    let mut effect = unsafe { (*pdwEffect).0 };
     let _ = unsafe {
       self.composition_controller.Drop(
         data_obj,

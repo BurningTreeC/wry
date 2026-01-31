@@ -195,7 +195,6 @@ impl InnerWebView {
 
     // TiddlyDesktop: Enable external drops - drag-drop is handled via composition controller forwarding
     let drag_drop_controller: Option<DragDropController> = {
-      let _ = drop_handler; // Not used - we handle drag-drop via IDropTarget on hwnd
       unsafe {
         let _ = controller
           .cast::<ICoreWebView2Controller4>()
@@ -205,9 +204,15 @@ impl InnerWebView {
     };
 
     // TiddlyDesktop: Register composition drag-drop target on hwnd
+    // This both forwards drag events to WebView2 AND extracts file paths for the handler
     let composition_drop_target = if let Some(ref comp_ctrl) = composition_controller {
       comp_ctrl.cast::<ICoreWebView2CompositionController3>().ok().and_then(|ctrl3| {
-        CompositionDragDropTarget::register(hwnd, ctrl3).ok()
+        if let Some(handler) = drop_handler {
+          CompositionDragDropTarget::register(hwnd, ctrl3, handler).ok()
+        } else {
+          // No handler provided - use a no-op handler
+          CompositionDragDropTarget::register(hwnd, ctrl3, Box::new(|_| true)).ok()
+        }
       })
     } else {
       None

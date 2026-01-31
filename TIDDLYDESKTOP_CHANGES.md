@@ -164,7 +164,39 @@ These functions extract full pointer metadata from Windows APIs:
 - `GetPointerPenInfo()` for pen (pressure, tilt, rotation)
 - `GetPointerInfo()` for generic/mouse (basic pointer data)
 
-### 2. `src/webkitgtk/drag_drop.rs` (Linux)
+### 2. `src/webview2/drag_drop.rs` (Windows)
+
+#### Modified: `CompositionDragDropTarget`
+The `CompositionDragDropTarget` now both forwards drag events to WebView2 AND extracts file paths for the application:
+
+```rust
+#[implement(IDropTarget)]
+pub struct CompositionDragDropTarget {
+  hwnd: HWND,
+  composition_controller: ICoreWebView2CompositionController3,
+  listener: Rc<dyn Fn(DragDropEvent) -> bool>,  // NEW: listener for file paths
+  cursor_effect: UnsafeCell<DROPEFFECT>,
+  enter_is_valid: UnsafeCell<bool>,
+}
+```
+
+Key changes:
+- Added `listener` field to call with `DragDropEvent::Enter/Over/Leave/Drop` events
+- `DragEnter`: Extracts file paths, calls listener, then forwards to WebView2
+- `DragOver`: Calls listener with position, then forwards to WebView2
+- `DragLeave`: Calls listener, then forwards to WebView2
+- `Drop`: Extracts file paths, calls listener BEFORE forwarding to WebView2
+
+This enables TiddlyDesktop to receive file paths via Tauri's `onDragDropEvent` while HTML5 drag events still work in the WebView.
+
+#### New: `iterate_filenames_ref` helper
+Added a helper function that takes `&IDataObject` instead of `Ref<'_, IDataObject>`:
+```rust
+unsafe fn iterate_filenames_ref<F>(data_obj: &IDataObject, callback: F) -> Option<HDROP>
+```
+This allows reusing the data object reference for both path extraction and forwarding.
+
+### 3. `src/webkitgtk/drag_drop.rs` (Linux)
 
 #### Modified: `connect_drag_drop` handler
 The original code intercepts drops and prevents WebKit from handling them. The modification allows WebKit to handle all drops natively while still emitting events:
