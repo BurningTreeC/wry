@@ -2070,9 +2070,20 @@ impl InnerWebView {
         }
       }
 
-      WM_SETFOCUS | WM_ENTERSIZEMOVE => {
-        let controller = dwrefdata as *mut ICoreWebView2Controller;
-        let _ = (*controller).MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
+      WM_SETFOCUS => {
+        // Only handle from container subclass - focus should go to WebView when container gets focus
+        if is_container_subclass && dwrefdata != 0 {
+          let controller = dwrefdata as *mut ICoreWebView2Controller;
+          let _ = (*controller).MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
+        }
+      }
+
+      WM_ENTERSIZEMOVE => {
+        // Resize/move operation starting - can be from either subclass
+        if dwrefdata != 0 {
+          let controller = dwrefdata as *mut ICoreWebView2Controller;
+          let _ = (*controller).MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
+        }
       }
 
       msg if msg == WM_MOVE || msg == WM_MOVING => {
