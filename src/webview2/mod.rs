@@ -1589,6 +1589,7 @@ impl InnerWebView {
 
             let virtual_keys = COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS((wparam.0 & 0xFF) as i32);
             let mouse_data = if msg == WM_MOUSEWHEEL || msg == WM_MOUSEHWHEEL {
+              // Wheel delta is signed 16-bit in high word of wparam
               ((wparam.0 >> 16) & 0xFFFF) as u32
             } else if msg == WM_XBUTTONDOWN || msg == WM_XBUTTONUP || msg == WM_XBUTTONDBLCLK {
               ((wparam.0 >> 16) & 0xFFFF) as u32
@@ -1596,9 +1597,16 @@ impl InnerWebView {
               0
             };
 
-            let x = (lparam.0 & 0xFFFF) as i16 as i32;
-            let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
-            let point = POINT { x, y };
+            // Extract coordinates from lparam
+            let mut point = POINT {
+              x: (lparam.0 & 0xFFFF) as i16 as i32,
+              y: ((lparam.0 >> 16) & 0xFFFF) as i16 as i32,
+            };
+
+            // WM_MOUSEWHEEL and WM_MOUSEHWHEEL have screen coordinates, not client coordinates
+            if msg == WM_MOUSEWHEEL || msg == WM_MOUSEHWHEEL {
+              let _ = ScreenToClient(hwnd, &mut point);
+            }
 
             let _ = comp_ctrl.SendMouseInput(event_kind, virtual_keys, mouse_data, point);
           }
@@ -1713,17 +1721,46 @@ impl InnerWebView {
 
     // TiddlyDesktop: Keyboard event handling
     // In composition hosting mode, keyboard events need to be forwarded to the WebView2's
-    // internal window. We do this by finding the Chrome_WidgetWin child and posting messages.
+    // internal Chrome_WidgetWin window for processing
     match msg {
       WM_KEYDOWN | WM_KEYUP | WM_CHAR | WM_DEADCHAR |
       WM_SYSKEYDOWN | WM_SYSKEYUP | WM_SYSCHAR | WM_SYSDEADCHAR |
       WM_UNICHAR => {
         if dwrefdata != 0 {
           let controller = dwrefdata as *mut ICoreWebView2Controller;
-          // Ensure WebView2 has focus to receive keyboard input
+          // Ensure WebView2 has focus
           let _ = (*controller).MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
+
+          // Find Chrome_WidgetWin child and forward keyboard messages
+          // WebView2 creates these windows even in composition mode for input handling
+          unsafe extern "system" fn find_chrome_widget(child: HWND, lparam: LPARAM) -> BOOL {
+            let mut class_name = [0u16; 256];
+            let len = GetClassNameW(child, &mut class_name);
+            if len > 0 {
+              let name = String::from_utf16_lossy(&class_name[..len as usize]);
+              if name.starts_with("Chrome_WidgetWin") {
+                let result = lparam.0 as *mut HWND;
+                *result = child;
+                return BOOL(0); // Stop enumeration
+              }
+            }
+            BOOL(1) // Continue
+          }
+
+          let mut chrome_hwnd = HWND::default();
+          let _ = EnumChildWindows(
+            Some(hwnd),
+            Some(find_chrome_widget),
+            LPARAM(&mut chrome_hwnd as *mut HWND as isize),
+          );
+
+          if !chrome_hwnd.is_invalid() {
+            // Forward the keyboard message to Chrome_WidgetWin
+            let _ = PostMessageW(Some(chrome_hwnd), msg, wparam, lparam);
+            return LRESULT(0); // Message handled
+          }
         }
-        // Let DefSubclassProc handle it - it will route to the focused window
+        // Fall through to DefSubclassProc if Chrome_WidgetWin not found
       }
       _ => {}
     }
