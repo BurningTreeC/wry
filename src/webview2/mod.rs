@@ -41,6 +41,8 @@ use windows::{
       },
       Shell::*,
       WindowsAndMessaging::*,
+      // TiddlyDesktop: Accessibility support
+      Accessibility::LresultFromObject,
     },
   },
 };
@@ -185,6 +187,85 @@ impl InnerWebView {
       }
       None
     };
+
+    // TiddlyDesktop: Set up composition controller output event handlers
+    if let Some(ref comp_ctrl) = composition_controller {
+      unsafe {
+        // CursorChanged event - update cursor when WebView2 requests a change
+        let hwnd_for_cursor = hwnd;
+        let mut cursor_token = EventRegistrationToken::default();
+        let _ = comp_ctrl.add_CursorChanged(
+          &CursorChangedEventHandler::create(Box::new(move |sender, _| {
+            if let Some(sender) = sender {
+              let mut cursor = HCURSOR::default();
+              if sender.Cursor(&mut cursor).is_ok() && !cursor.is_invalid() {
+                SetCursor(Some(cursor));
+              } else {
+                // Fallback to system cursor ID
+                let mut cursor_id = 0u32;
+                if sender.SystemCursorId(&mut cursor_id).is_ok() && cursor_id != 0 {
+                  // Map system cursor ID to cursor resource
+                  let cursor_name = match cursor_id {
+                    32512 => IDC_ARROW,      // ARROW
+                    32513 => IDC_IBEAM,      // IBEAM
+                    32514 => IDC_WAIT,       // WAIT
+                    32515 => IDC_CROSS,      // CROSS
+                    32516 => IDC_UPARROW,    // UPARROW
+                    32642 => IDC_SIZENWSE,   // SIZENWSE
+                    32643 => IDC_SIZENESW,   // SIZENESW
+                    32644 => IDC_SIZEWE,     // SIZEWE
+                    32645 => IDC_SIZENS,     // SIZENS
+                    32646 => IDC_SIZEALL,    // SIZEALL
+                    32648 => IDC_NO,         // NO
+                    32649 => IDC_HAND,       // HAND
+                    32650 => IDC_APPSTARTING,// APPSTARTING
+                    32651 => IDC_HELP,       // HELP
+                    _ => IDC_ARROW,
+                  };
+                  if let Ok(cursor) = LoadCursorW(None, cursor_name) {
+                    SetCursor(Some(cursor));
+                  }
+                }
+              }
+            }
+            Ok(())
+          })),
+          &mut cursor_token,
+        );
+
+        // Request mouse leave tracking for the container window
+        let mut tme = TRACKMOUSEEVENT {
+          cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+          dwFlags: TME_LEAVE,
+          hwndTrack: hwnd_for_cursor,
+          dwHoverTime: 0,
+        };
+        let _ = TrackMouseEvent(&mut tme);
+
+        // TiddlyDesktop: Accessibility support via UI Automation
+        // Get the AutomationProvider for screen readers and other assistive technologies
+        if let Ok(comp_ctrl2) = comp_ctrl.cast::<ICoreWebView2CompositionController2>() {
+          // The AutomationProvider is available for the host to return in WM_GETOBJECT
+          // We verify it's accessible but the actual handling is done in the subclass proc
+          let _ = comp_ctrl2.AutomationProvider();
+          // Note: The automation provider should be returned in response to WM_GETOBJECT
+          // with OBJID_CLIENT. This is handled automatically when WebView2 has focus.
+        }
+
+        // TiddlyDesktop: Non-client region support for custom title bars (if needed)
+        if let Ok(comp_ctrl4) = comp_ctrl.cast::<ICoreWebView2CompositionController4>() {
+          let mut nc_token = EventRegistrationToken::default();
+          let _ = comp_ctrl4.add_NonClientRegionChanged(
+            &NonClientRegionChangedEventHandler::create(Box::new(|_, _| {
+              // Non-client region changed - WebView2 handles this for custom title bars
+              // The app can use this to update hit testing regions
+              Ok(())
+            })),
+            &mut nc_token,
+          );
+        }
+      }
+    }
 
     let w = Self {
       id,
@@ -1739,6 +1820,95 @@ impl InnerWebView {
           dwHoverTime: 0,
         };
         let _ = TrackMouseEvent(&mut tme);
+      }
+      _ => {}
+    }
+
+    // TiddlyDesktop: Accessibility support via WM_GETOBJECT
+    const WM_GETOBJECT: u32 = 0x003D;
+    const OBJID_CLIENT: i32 = -4;
+    match msg {
+      WM_GETOBJECT => {
+        // Handle accessibility requests from screen readers
+        if dwrefdata != 0 && lparam.0 as i32 == OBJID_CLIENT {
+          let controller = dwrefdata as *mut ICoreWebView2Controller;
+          if let Ok(comp_ctrl) = (*controller).cast::<ICoreWebView2CompositionController>() {
+            if let Ok(comp_ctrl2) = comp_ctrl.cast::<ICoreWebView2CompositionController2>() {
+              if let Ok(provider) = comp_ctrl2.AutomationProvider() {
+                // Return the automation provider to the caller
+                // The caller (e.g., screen reader) will use this for accessibility
+                // Use LresultFromObject to return the provider
+                return LresultFromObject(
+                  &windows_core::IUnknown::IID,
+                  wparam,
+                  &provider,
+                );
+              }
+            }
+          }
+        }
+      }
+      _ => {}
+    }
+
+    // TiddlyDesktop: System commands (minimize, maximize, close, etc.)
+    match msg {
+      WM_SYSCOMMAND => {
+        // System commands like minimize, maximize, restore
+        // Let these pass through to DefSubclassProc
+        // WebView2 will handle visibility changes via SetIsVisible
+      }
+      _ => {}
+    }
+
+    // TiddlyDesktop: Window state change notifications
+    const WM_SHOWWINDOW: u32 = 0x0018;
+    match msg {
+      WM_SHOWWINDOW => {
+        if dwrefdata != 0 {
+          let controller = dwrefdata as *mut ICoreWebView2Controller;
+          let is_shown = wparam.0 != 0;
+          let _ = (*controller).SetIsVisible(is_shown);
+        }
+      }
+      _ => {}
+    }
+
+    // TiddlyDesktop: Theme/appearance change handling
+    const WM_THEMECHANGED: u32 = 0x031A;
+    const WM_SETTINGCHANGE: u32 = 0x001A;
+    const WM_DISPLAYCHANGE: u32 = 0x007E;
+    match msg {
+      WM_THEMECHANGED | WM_SETTINGCHANGE => {
+        // Theme or system settings changed
+        // WebView2 handles dark/light mode internally via media queries
+        // but we can notify the app if needed
+        if dwrefdata != 0 {
+          let controller = dwrefdata as *mut ICoreWebView2Controller;
+          let _ = (*controller).NotifyParentWindowPositionChanged();
+        }
+      }
+      WM_DISPLAYCHANGE => {
+        // Display settings changed (resolution, color depth)
+        if dwrefdata != 0 {
+          let controller = dwrefdata as *mut ICoreWebView2Controller;
+          let _ = (*controller).NotifyParentWindowPositionChanged();
+        }
+      }
+      _ => {}
+    }
+
+    // TiddlyDesktop: Paint handling for composition
+    match msg {
+      WM_PAINT => {
+        // In composition hosting, WebView2 renders to DirectComposition visual
+        // We don't need to handle WM_PAINT for the web content
+        // Let DefSubclassProc handle any window chrome painting
+      }
+      WM_ERASEBKGND => {
+        // Prevent flicker - WebView2 handles its own background
+        // Return 1 to indicate background is erased (even though we didn't do anything)
+        return LRESULT(1);
       }
       _ => {}
     }

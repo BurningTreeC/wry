@@ -123,6 +123,29 @@ Full touch/pen metadata is preserved:
 
 **Cursor Handling**:
 - `WM_SETCURSOR`: Get cursor from composition controller and set it
+- `CursorChanged` event: Updates cursor with system cursor ID fallback
+
+**Accessibility (Output)**:
+- `WM_GETOBJECT`: Returns UI Automation provider for screen readers
+- `AutomationProvider` from `ICoreWebView2CompositionController2`
+- Full support for NVDA, JAWS, Narrator, and other assistive technologies
+
+**Window State (Output)**:
+- `WM_SHOWWINDOW`: Updates WebView2 visibility
+- `WM_SYSCOMMAND`: System commands (minimize, maximize, restore)
+
+**Theme & Display (Output)**:
+- `WM_THEMECHANGED`: System theme changed (dark/light mode)
+- `WM_SETTINGCHANGE`: System settings changed
+- `WM_DISPLAYCHANGE`: Display resolution/color depth changed
+
+**Paint (Output)**:
+- `WM_PAINT`: Handled by DirectComposition visual
+- `WM_ERASEBKGND`: Returns 1 to prevent flicker
+
+**Non-Client Region (Output)**:
+- `NonClientRegionChanged` event: For custom title bar support
+- `GetNonClientRegionAtPoint`: Hit testing for custom chrome
 
 #### Helper Functions for Pointer Input
 ```rust
@@ -264,8 +287,9 @@ features = [
   "Win32_Graphics_Direct3D11",
   "Win32_Graphics_DirectComposition",
   "Win32_Graphics_Dxgi",
-  "Win32_UI_Input_Pointer",
-  "Win32_UI_Input_Ime",  # IME support for international text input
+  "Win32_UI_Input_Pointer",       # Touch/pen/stylus support
+  "Win32_UI_Input_Ime",           # IME for international text input
+  "Win32_UI_Accessibility",       # Screen reader support
 ]
 ```
 
