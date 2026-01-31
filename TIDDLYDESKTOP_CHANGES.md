@@ -88,6 +88,39 @@ Full touch/pen metadata is preserved:
 - `WM_IME_REQUEST`, `WM_IME_KEYDOWN`, `WM_IME_KEYUP`
 - `WM_IME_COMPOSITIONFULL`, `WM_IME_SELECT`
 
+**Keyboard Events**:
+- `WM_KEYDOWN`, `WM_KEYUP`, `WM_CHAR`, `WM_DEADCHAR`
+- `WM_SYSKEYDOWN`, `WM_SYSKEYUP`, `WM_SYSCHAR`, `WM_SYSDEADCHAR`
+- `WM_UNICHAR` for Unicode input
+- Ensures WebView2 focus for keyboard input
+
+**Touch Gestures**:
+- `WM_GESTURE` - pinch-to-zoom, pan, rotate
+- `WM_GESTURENOTIFY` - gesture configuration
+- `WM_TOUCH` - legacy touch input for compatibility
+
+**Mouse Capture**:
+- `WM_CAPTURECHANGED` - resets mouse state when capture is lost
+
+**Non-Client Area Mouse** (window chrome):
+- `WM_NCMOUSEMOVE`, `WM_NCLBUTTONDOWN/UP`, `WM_NCRBUTTONDOWN/UP`
+- `WM_NCMBUTTONDOWN/UP`, `WM_NCXBUTTONDOWN/UP`
+- All double-click variants for non-client area
+
+**Context Menu**:
+- `WM_CONTEXTMENU` - ensures WebView2 focus for context menu handling
+
+**DPI Changes**:
+- `WM_DPICHANGED` - updates WebView2 bounds and notifies of DPI change
+
+**Focus & Activation**:
+- `WM_ACTIVATE` - gives focus to WebView2 when window activates
+- `WM_MOUSEACTIVATE` - ensures focus on mouse click activation
+- `WM_KILLFOCUS` - handled internally by WebView2
+
+**Mouse Tracking**:
+- Registers `TrackMouseEvent` with `TME_LEAVE` for `WM_MOUSELEAVE` notifications
+
 **Cursor Handling**:
 - `WM_SETCURSOR`: Get cursor from composition controller and set it
 

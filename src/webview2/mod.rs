@@ -32,7 +32,7 @@ use windows::{
     UI::{
       Input::{
         Ime::{ImmGetContext, ImmReleaseContext, ImmSetCompositionWindow, COMPOSITIONFORM, CFS_POINT},
-        KeyboardAndMouse::SetFocus,
+        KeyboardAndMouse::{SetFocus, TrackMouseEvent, TRACKMOUSEEVENT, TME_LEAVE},
         // TiddlyDesktop: Pointer events for touch/pen support with full touch/pen info
         Pointer::{
           GetPointerInfo, GetPointerPenInfo, GetPointerTouchInfo, GetPointerType,
@@ -1369,9 +1369,35 @@ impl InnerWebView {
     const PT_PEN: i32 = 3;
     const PT_MOUSE: i32 = 4;
 
-    // Mouse tracking constants (may not be in windows crate glob)
+    // Mouse tracking constants
     const TD_WM_MOUSELEAVE: u32 = 0x02A3;
     const TD_WM_SETCURSOR: u32 = 0x0020;
+    const TD_WM_NCMOUSELEAVE: u32 = 0x02A2;
+
+    // Gesture constants for touch gestures
+    const WM_GESTURE: u32 = 0x0119;
+    const WM_GESTURENOTIFY: u32 = 0x011A;
+
+    // Touch input constants
+    const WM_TOUCH: u32 = 0x0240;
+
+    // Non-client mouse messages
+    const TD_WM_NCMOUSEMOVE: u32 = 0x00A0;
+    const TD_WM_NCLBUTTONDOWN: u32 = 0x00A1;
+    const TD_WM_NCLBUTTONUP: u32 = 0x00A2;
+    const TD_WM_NCLBUTTONDBLCLK: u32 = 0x00A3;
+    const TD_WM_NCRBUTTONDOWN: u32 = 0x00A4;
+    const TD_WM_NCRBUTTONUP: u32 = 0x00A5;
+    const TD_WM_NCRBUTTONDBLCLK: u32 = 0x00A6;
+    const TD_WM_NCMBUTTONDOWN: u32 = 0x00A7;
+    const TD_WM_NCMBUTTONUP: u32 = 0x00A8;
+    const TD_WM_NCMBUTTONDBLCLK: u32 = 0x00A9;
+    const TD_WM_NCXBUTTONDOWN: u32 = 0x00AB;
+    const TD_WM_NCXBUTTONUP: u32 = 0x00AC;
+    const TD_WM_NCXBUTTONDBLCLK: u32 = 0x00AD;
+
+    // DPI change constant
+    const TD_WM_DPICHANGED: u32 = 0x02E0;
 
     // TiddlyDesktop: Forward pointer events to composition controller using SendPointerInput
     // This preserves full touch/pen metadata (pressure, tilt, contact area, etc.)
@@ -1545,6 +1571,174 @@ impl InnerWebView {
           }
         }
         // Let the message pass through to DefSubclassProc which will route to WebView2
+      }
+      _ => {}
+    }
+
+    // TiddlyDesktop: Keyboard event handling
+    // In composition hosting mode, keyboard events need to be forwarded to the WebView2's
+    // internal window. We do this by finding the Chrome_WidgetWin child and posting messages.
+    match msg {
+      WM_KEYDOWN | WM_KEYUP | WM_CHAR | WM_DEADCHAR |
+      WM_SYSKEYDOWN | WM_SYSKEYUP | WM_SYSCHAR | WM_SYSDEADCHAR |
+      WM_UNICHAR => {
+        if dwrefdata != 0 {
+          let controller = dwrefdata as *mut ICoreWebView2Controller;
+          // Ensure WebView2 has focus to receive keyboard input
+          let _ = (*controller).MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
+        }
+        // Let DefSubclassProc handle it - it will route to the focused window
+      }
+      _ => {}
+    }
+
+    // TiddlyDesktop: Touch gesture handling (pinch-to-zoom, pan, rotate)
+    match msg {
+      WM_GESTURE => {
+        // Forward gesture messages to WebView2
+        // WebView2 handles gestures internally when it has focus
+        if dwrefdata != 0 {
+          let controller = dwrefdata as *mut ICoreWebView2Controller;
+          let _ = (*controller).MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
+        }
+      }
+      WM_GESTURENOTIFY => {
+        // Respond to gesture notification - WebView2 will handle gesture configuration
+        // Return DefSubclassProc to allow default gesture handling
+      }
+      WM_TOUCH => {
+        // Legacy touch input (pre-Windows 8 style)
+        // Modern apps should use pointer messages instead, which we handle above
+        // Let it pass through for compatibility
+      }
+      _ => {}
+    }
+
+    // TiddlyDesktop: Mouse capture handling
+    match msg {
+      WM_CAPTURECHANGED => {
+        // Mouse capture changed - WebView2 needs to know
+        if dwrefdata != 0 {
+          let controller = dwrefdata as *mut ICoreWebView2Controller;
+          if let Ok(comp_ctrl) = (*controller).cast::<ICoreWebView2CompositionController>() {
+            // Send a mouse leave to reset state when capture is lost
+            let _ = comp_ctrl.SendMouseInput(
+              COREWEBVIEW2_MOUSE_EVENT_KIND_LEAVE,
+              COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS(0),
+              0,
+              POINT { x: 0, y: 0 },
+            );
+          }
+        }
+      }
+      _ => {}
+    }
+
+    // TiddlyDesktop: Non-client area mouse handling (title bar, borders, etc.)
+    match msg {
+      TD_WM_NCMOUSEMOVE | TD_WM_NCLBUTTONDOWN | TD_WM_NCLBUTTONUP | TD_WM_NCLBUTTONDBLCLK |
+      TD_WM_NCRBUTTONDOWN | TD_WM_NCRBUTTONUP | TD_WM_NCRBUTTONDBLCLK |
+      TD_WM_NCMBUTTONDOWN | TD_WM_NCMBUTTONUP | TD_WM_NCMBUTTONDBLCLK |
+      TD_WM_NCXBUTTONDOWN | TD_WM_NCXBUTTONUP | TD_WM_NCXBUTTONDBLCLK => {
+        // Non-client mouse messages are typically for window chrome
+        // Let them pass through to DefSubclassProc for default handling
+        // WebView2 doesn't need these as they're outside the web content area
+      }
+      TD_WM_NCMOUSELEAVE => {
+        // Non-client area mouse leave - can ignore for WebView2
+      }
+      _ => {}
+    }
+
+    // TiddlyDesktop: Context menu handling
+    match msg {
+      WM_CONTEXTMENU => {
+        // Context menu request - WebView2 handles its own context menu
+        // via the ContextMenuRequested event, so we let it pass through
+        if dwrefdata != 0 {
+          let controller = dwrefdata as *mut ICoreWebView2Controller;
+          let _ = (*controller).MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
+        }
+      }
+      _ => {}
+    }
+
+    // TiddlyDesktop: DPI change handling for high-DPI displays
+    match msg {
+      TD_WM_DPICHANGED => {
+        if dwrefdata != 0 {
+          let controller = dwrefdata as *mut ICoreWebView2Controller;
+          // Notify WebView2 of DPI change
+          let _ = (*controller).NotifyParentWindowPositionChanged();
+
+          // The lparam contains the suggested new window rect
+          let suggested_rect = lparam.0 as *const RECT;
+          if !suggested_rect.is_null() {
+            let rect = &*suggested_rect;
+            let width = rect.right - rect.left;
+            let height = rect.bottom - rect.top;
+
+            // Update WebView2 bounds
+            let _ = (*controller).SetBounds(RECT {
+              left: 0,
+              top: 0,
+              right: width,
+              bottom: height,
+            });
+
+            // Update the container window position
+            let _ = SetWindowPos(
+              hwnd,
+              None,
+              rect.left,
+              rect.top,
+              width,
+              height,
+              SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+          }
+        }
+      }
+      _ => {}
+    }
+
+    // TiddlyDesktop: Focus and activation handling
+    match msg {
+      WM_ACTIVATE => {
+        if dwrefdata != 0 {
+          let controller = dwrefdata as *mut ICoreWebView2Controller;
+          let activation_state = (wparam.0 & 0xFFFF) as u32;
+          if activation_state != 0 {
+            // Window is being activated - give focus to WebView2
+            let _ = (*controller).MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
+          }
+        }
+      }
+      WM_KILLFOCUS => {
+        // Focus is being lost - WebView2 handles this internally
+        // No special handling needed
+      }
+      WM_MOUSEACTIVATE => {
+        // Mouse click activation - ensure WebView2 gets focus
+        if dwrefdata != 0 {
+          let controller = dwrefdata as *mut ICoreWebView2Controller;
+          let _ = (*controller).MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
+        }
+      }
+      _ => {}
+    }
+
+    // TiddlyDesktop: Enable mouse tracking for WM_MOUSELEAVE events
+    match msg {
+      WM_MOUSEMOVE => {
+        // Request mouse leave notification when mouse exits window
+        let mut tme = TRACKMOUSEEVENT {
+          cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+          dwFlags: TME_LEAVE,
+          hwndTrack: hwnd,
+          dwHoverTime: 0,
+        };
+        let _ = TrackMouseEvent(&mut tme);
       }
       _ => {}
     }
