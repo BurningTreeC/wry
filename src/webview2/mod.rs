@@ -1468,9 +1468,13 @@ impl InnerWebView {
     msg: u32,
     wparam: WPARAM,
     lparam: LPARAM,
-    _uidsubclass: usize,
+    uidsubclass: usize,
     dwrefdata: usize,
   ) -> LRESULT {
+    // TiddlyDesktop: Check if this is the container input subclass (for input forwarding)
+    // vs the parent subclass (for resize/destroy). Only forward input from container.
+    let is_container_subclass = uidsubclass == CONTAINER_INPUT_SUBCLASS_ID as usize;
+
     // TiddlyDesktop: Pointer message constants for touch/pen/stylus support
     const WM_POINTERACTIVATE: u32 = 0x024B;
     const WM_POINTERDOWN: u32 = 0x0246;
@@ -1519,11 +1523,12 @@ impl InnerWebView {
 
     // TiddlyDesktop: Forward pointer events to composition controller using SendPointerInput
     // This preserves full touch/pen metadata (pressure, tilt, contact area, etc.)
+    // Only forward from container subclass to ensure correct coordinates
     match msg {
       WM_POINTERACTIVATE | WM_POINTERDOWN | WM_POINTERUP | WM_POINTERUPDATE |
       WM_POINTERENTER | WM_POINTERLEAVE | WM_POINTERCAPTURECHANGED |
       WM_POINTERWHEEL | WM_POINTERHWHEEL => {
-        if dwrefdata != 0 {
+        if is_container_subclass && dwrefdata != 0 {
           let controller = dwrefdata as *mut ICoreWebView2Controller;
           if let Ok(comp_ctrl) = (*controller).cast::<ICoreWebView2CompositionController>() {
             // Get pointer ID from LOWORD of wParam
@@ -1577,12 +1582,14 @@ impl InnerWebView {
     }
 
     // TiddlyDesktop: Forward mouse events to composition controller
+    // Only forward from container subclass (hwnd), not parent subclass
+    // Parent subclass coords are relative to parent, not WebView
     match msg {
       WM_LBUTTONDOWN | WM_LBUTTONUP | WM_RBUTTONDOWN | WM_RBUTTONUP |
       WM_MBUTTONDOWN | WM_MBUTTONUP | WM_MOUSEMOVE | WM_MOUSEWHEEL |
       WM_XBUTTONDOWN | WM_XBUTTONUP | WM_LBUTTONDBLCLK | WM_RBUTTONDBLCLK |
       WM_MBUTTONDBLCLK | WM_XBUTTONDBLCLK | WM_MOUSEHWHEEL => {
-        if dwrefdata != 0 {
+        if is_container_subclass && dwrefdata != 0 {
           let controller = dwrefdata as *mut ICoreWebView2Controller;
           if let Ok(comp_ctrl) = (*controller).cast::<ICoreWebView2CompositionController>() {
             let event_kind = match msg {
@@ -1630,7 +1637,7 @@ impl InnerWebView {
         }
       }
       TD_WM_MOUSELEAVE => {
-        if dwrefdata != 0 {
+        if is_container_subclass && dwrefdata != 0 {
           let controller = dwrefdata as *mut ICoreWebView2Controller;
           if let Ok(comp_ctrl) = (*controller).cast::<ICoreWebView2CompositionController>() {
             let _ = comp_ctrl.SendMouseInput(
@@ -1645,8 +1652,9 @@ impl InnerWebView {
       TD_WM_SETCURSOR => {
         // TiddlyDesktop: Handle cursor for composition hosting mode
         // In composition hosting, WebView2 doesn't have its own HWND, so we must handle cursors
+        // Only handle on container subclass
         let mut cursor_set = false;
-        if dwrefdata != 0 {
+        if is_container_subclass && dwrefdata != 0 {
           let controller = dwrefdata as *mut ICoreWebView2Controller;
           if let Ok(comp_ctrl) = (*controller).cast::<ICoreWebView2CompositionController>() {
             let mut cursor = HCURSOR::default();
