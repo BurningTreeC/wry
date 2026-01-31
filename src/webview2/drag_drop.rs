@@ -367,7 +367,7 @@ impl IDropTarget_Impl for CompositionDragDropTarget_Impl {
     let mut point = POINT { x: pt.x, y: pt.y };
     let _ = unsafe { ScreenToClient(self.hwnd, &mut point) };
 
-    // Call listener with Over event
+    // Call listener with Over event (only for file drags)
     if unsafe { *self.enter_is_valid.get() } {
       (self.listener)(DragDropEvent::Over {
         position: (point.x as _, point.y as _),
@@ -384,8 +384,13 @@ impl IDropTarget_Impl for CompositionDragDropTarget_Impl {
       )
     };
 
-    // Use our cached cursor effect for files
-    unsafe { *pdwEffect = *self.cursor_effect.get() };
+    // For file drags, use our cached DROPEFFECT_COPY
+    // For non-file drags (internal HTML5 drags), use composition controller's effect
+    if unsafe { *self.enter_is_valid.get() } {
+      unsafe { *pdwEffect = *self.cursor_effect.get() };
+    } else {
+      unsafe { (*pdwEffect).0 = effect };
+    }
 
     Ok(())
   }
