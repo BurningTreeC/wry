@@ -60,6 +60,8 @@ type EventRegistrationToken = i64;
 const PARENT_SUBCLASS_ID: u32 = WM_USER + 0x64;
 const PARENT_DESTROY_MESSAGE: u32 = WM_USER + 0x65;
 const MAIN_THREAD_DISPATCHER_SUBCLASS_ID: u32 = WM_USER + 0x66;
+// TiddlyDesktop: Separate subclass ID for container window input forwarding in composition mode
+const CONTAINER_INPUT_SUBCLASS_ID: u32 = WM_USER + 0x67;
 static EXEC_MSG_ID: Lazy<u32> = Lazy::new(|| unsafe { RegisterWindowMessageA(s!("Wry::ExecMsg")) });
 
 impl From<webview2_com::Error> for Error {
@@ -103,6 +105,8 @@ pub(crate) struct InnerWebView {
 impl Drop for InnerWebView {
   fn drop(&mut self) {
     let _ = unsafe { self.controller.Close() };
+    // TiddlyDesktop: Detach container input subclass before destroying window
+    unsafe { Self::dettach_container_input_subclass(self.hwnd) };
     if self.is_child {
       let _ = unsafe { DestroyWindow(self.hwnd) };
     }
@@ -271,6 +275,11 @@ impl InnerWebView {
         }
       }
     }
+
+    // TiddlyDesktop: Attach input subclass to container window (hwnd) for composition hosting
+    // In composition mode, mouse messages go to the container window, not parent
+    // We need to forward them to the composition controller
+    unsafe { Self::attach_container_input_subclass(hwnd, &controller) };
 
     let w = Self {
       id,
@@ -2031,6 +2040,18 @@ impl InnerWebView {
     );
   }
 
+  // TiddlyDesktop: Attach input subclass to container window for composition hosting mode
+  // This is separate from parent subclass because mouse messages go directly to the container
+  #[inline]
+  unsafe fn attach_container_input_subclass(hwnd: HWND, controller: &ICoreWebView2Controller) {
+    let _ = SetWindowSubclass(
+      hwnd,
+      Some(Self::parent_subclass_proc), // Reuse same proc - it handles input forwarding
+      CONTAINER_INPUT_SUBCLASS_ID as _,
+      Box::into_raw(Box::new(controller.clone())) as _,
+    );
+  }
+
   #[inline]
   unsafe fn dettach_parent_subclass(parent: HWND) {
     SendMessageW(parent, PARENT_DESTROY_MESSAGE, None, None);
@@ -2038,6 +2059,16 @@ impl InnerWebView {
       parent,
       Some(Self::parent_subclass_proc),
       PARENT_SUBCLASS_ID as _,
+    );
+  }
+
+  // TiddlyDesktop: Detach container input subclass
+  #[inline]
+  unsafe fn dettach_container_input_subclass(hwnd: HWND) {
+    let _ = RemoveWindowSubclass(
+      hwnd,
+      Some(Self::parent_subclass_proc),
+      CONTAINER_INPUT_SUBCLASS_ID as _,
     );
   }
 
