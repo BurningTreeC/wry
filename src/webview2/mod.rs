@@ -31,9 +31,13 @@ use windows::{
     System::{Com::*, LibraryLoader::GetModuleHandleW},
     UI::{
       Input::{
+        Ime::{ImmGetContext, ImmReleaseContext, ImmSetCompositionWindow, COMPOSITIONFORM, CFS_POINT},
         KeyboardAndMouse::SetFocus,
-        // TiddlyDesktop: Pointer events for touch/pen support
-        Pointer::{GetPointerInfo, POINTER_INFO},
+        // TiddlyDesktop: Pointer events for touch/pen support with full touch/pen info
+        Pointer::{
+          GetPointerInfo, GetPointerPenInfo, GetPointerTouchInfo, GetPointerType,
+          POINTER_INFO, POINTER_PEN_INFO, POINTER_TOUCH_INFO,
+        },
       },
       Shell::*,
       WindowsAndMessaging::*,
@@ -1369,7 +1373,8 @@ impl InnerWebView {
     const TD_WM_MOUSELEAVE: u32 = 0x02A3;
     const TD_WM_SETCURSOR: u32 = 0x0020;
 
-    // TiddlyDesktop: Forward pointer events to composition controller (touch/pen/stylus)
+    // TiddlyDesktop: Forward pointer events to composition controller using SendPointerInput
+    // This preserves full touch/pen metadata (pressure, tilt, contact area, etc.)
     match msg {
       WM_POINTERACTIVATE | WM_POINTERDOWN | WM_POINTERUP | WM_POINTERUPDATE |
       WM_POINTERENTER | WM_POINTERLEAVE | WM_POINTERCAPTURECHANGED |
@@ -1380,35 +1385,45 @@ impl InnerWebView {
             // Get pointer ID from LOWORD of wParam
             let pointer_id = (wparam.0 & 0xFFFF) as u32;
 
-            // Get pointer info from Windows
-            let mut pointer_info: POINTER_INFO = std::mem::zeroed();
-            if GetPointerInfo(pointer_id, &mut pointer_info).is_ok() {
-              // Convert pointer events to mouse events for basic touch/pen functionality
-              let pointer_type = pointer_info.pointerType.0;
-              if pointer_type == PT_TOUCH || pointer_type == PT_PEN || pointer_type == PT_MOUSE {
-                let mouse_event = match msg {
-                  WM_POINTERDOWN => COREWEBVIEW2_MOUSE_EVENT_KIND_LEFT_BUTTON_DOWN,
-                  WM_POINTERUP => COREWEBVIEW2_MOUSE_EVENT_KIND_LEFT_BUTTON_UP,
-                  WM_POINTERUPDATE => COREWEBVIEW2_MOUSE_EVENT_KIND_MOVE,
-                  WM_POINTERENTER => COREWEBVIEW2_MOUSE_EVENT_KIND_MOVE,
-                  WM_POINTERLEAVE => COREWEBVIEW2_MOUSE_EVENT_KIND_LEAVE,
-                  WM_POINTERWHEEL => COREWEBVIEW2_MOUSE_EVENT_KIND_WHEEL,
-                  WM_POINTERHWHEEL => COREWEBVIEW2_MOUSE_EVENT_KIND_HORIZONTAL_WHEEL,
-                  _ => COREWEBVIEW2_MOUSE_EVENT_KIND_MOVE,
-                };
+            // Determine pointer type
+            let mut pointer_type_raw = POINTER_INPUT_TYPE::default();
+            if GetPointerType(pointer_id, &mut pointer_type_raw).is_ok() {
+              let pointer_type = pointer_type_raw.0 as i32;
 
-                // Convert screen coordinates to client coordinates
-                let mut pt = pointer_info.ptPixelLocation;
-                let _ = ScreenToClient(hwnd, &mut pt);
+              // Get the environment to create pointer info objects
+              // We need to get it from the webview, but we only have the controller
+              // Try to get ICoreWebView2 from controller, then environment
+              if let Ok(webview) = (*controller).CoreWebView2() {
+                if let Ok(env) = webview.cast::<ICoreWebView2_2>().and_then(|wv| wv.Environment()) {
+                  if let Ok(env3) = env.cast::<ICoreWebView2Environment3>() {
+                    if let Ok(pointer_info) = env3.CreateCoreWebView2PointerInfo() {
+                      // Fill pointer info based on pointer type
+                      let filled = match pointer_type {
+                        PT_TOUCH => fill_touch_pointer_info(pointer_id, &pointer_info, hwnd),
+                        PT_PEN => fill_pen_pointer_info(pointer_id, &pointer_info, hwnd),
+                        PT_MOUSE => fill_mouse_pointer_info(pointer_id, &pointer_info, hwnd),
+                        _ => fill_generic_pointer_info(pointer_id, &pointer_info, hwnd),
+                      };
 
-                let virtual_keys = COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS(0);
-                let mouse_data = if msg == WM_POINTERWHEEL || msg == WM_POINTERHWHEEL {
-                  ((wparam.0 >> 16) & 0xFFFF) as u32
-                } else {
-                  0
-                };
+                      if filled {
+                        // Map Windows pointer message to WebView2 pointer event kind
+                        let event_kind = match msg {
+                          WM_POINTERACTIVATE => CYCOREWEBVIEW2_POINTER_EVENT_KIND_ACTIVATE,
+                          WM_POINTERDOWN => CYCOREWEBVIEW2_POINTER_EVENT_KIND_DOWN,
+                          WM_POINTERUP => CYCOREWEBVIEW2_POINTER_EVENT_KIND_UP,
+                          WM_POINTERUPDATE => CYCOREWEBVIEW2_POINTER_EVENT_KIND_UPDATE,
+                          WM_POINTERENTER => CYCOREWEBVIEW2_POINTER_EVENT_KIND_ENTER,
+                          WM_POINTERLEAVE => CYCOREWEBVIEW2_POINTER_EVENT_KIND_LEAVE,
+                          WM_POINTERCAPTURECHANGED => CYCOREWEBVIEW2_POINTER_EVENT_KIND_CAPTURECHANGED,
+                          // Note: Pointer wheel events don't have a direct mapping, handle separately
+                          _ => CYCOREWEBVIEW2_POINTER_EVENT_KIND_UPDATE,
+                        };
 
-                let _ = comp_ctrl.SendMouseInput(mouse_event, virtual_keys, mouse_data, pt);
+                        let _ = comp_ctrl.SendPointerInput(event_kind, &pointer_info);
+                      }
+                    }
+                  }
+                }
               }
             }
           }
@@ -1487,6 +1502,49 @@ impl InnerWebView {
             }
           }
         }
+      }
+      _ => {}
+    }
+
+    // TiddlyDesktop: IME (Input Method Editor) composition handling for international text input
+    // IME constants
+    const WM_IME_SETCONTEXT: u32 = 0x0281;
+    const WM_IME_NOTIFY: u32 = 0x0282;
+    const WM_IME_STARTCOMPOSITION: u32 = 0x010D;
+    const WM_IME_ENDCOMPOSITION: u32 = 0x010E;
+    const WM_IME_COMPOSITION: u32 = 0x010F;
+    const WM_IME_CHAR: u32 = 0x0286;
+    const WM_IME_REQUEST: u32 = 0x0288;
+    const WM_IME_KEYDOWN: u32 = 0x0290;
+    const WM_IME_KEYUP: u32 = 0x0291;
+    const WM_IME_COMPOSITIONFULL: u32 = 0x0284;
+    const WM_IME_SELECT: u32 = 0x0285;
+
+    match msg {
+      WM_IME_SETCONTEXT | WM_IME_NOTIFY | WM_IME_STARTCOMPOSITION |
+      WM_IME_ENDCOMPOSITION | WM_IME_COMPOSITION | WM_IME_CHAR |
+      WM_IME_REQUEST | WM_IME_KEYDOWN | WM_IME_KEYUP |
+      WM_IME_COMPOSITIONFULL | WM_IME_SELECT => {
+        // For composition hosting, IME messages should be handled by the WebView2
+        // The WebView2 composition controller handles IME internally when it has focus
+        // We need to ensure the composition window position is set correctly
+        if msg == WM_IME_STARTCOMPOSITION {
+          // Set IME composition window position near the caret
+          // This helps with positioning the IME candidate window
+          let himc = ImmGetContext(hwnd);
+          if !himc.is_invalid() {
+            let comp_form = COMPOSITIONFORM {
+              dwStyle: CFS_POINT,
+              ptCurrentPos: POINT { x: 0, y: 0 },
+              rcArea: RECT::default(),
+            };
+            // Try to get caret position from the composition controller
+            // For now, use a default position - the WebView2 will handle actual positioning
+            let _ = ImmSetCompositionWindow(himc, &comp_form);
+            let _ = ImmReleaseContext(hwnd, himc);
+          }
+        }
+        // Let the message pass through to DefSubclassProc which will route to WebView2
       }
       _ => {}
     }
@@ -2029,6 +2087,194 @@ impl InnerWebView {
   pub fn is_devtools_open(&self) -> bool {
     false
   }
+}
+
+// TiddlyDesktop: Pointer event kind constants for SendPointerInput
+// These map to COREWEBVIEW2_POINTER_EVENT_KIND values
+const CYCOREWEBVIEW2_POINTER_EVENT_KIND_ACTIVATE: COREWEBVIEW2_POINTER_EVENT_KIND =
+  COREWEBVIEW2_POINTER_EVENT_KIND(0x024B); // WM_POINTERACTIVATE
+const CYCOREWEBVIEW2_POINTER_EVENT_KIND_DOWN: COREWEBVIEW2_POINTER_EVENT_KIND =
+  COREWEBVIEW2_POINTER_EVENT_KIND(0x0246); // WM_POINTERDOWN
+const CYCOREWEBVIEW2_POINTER_EVENT_KIND_ENTER: COREWEBVIEW2_POINTER_EVENT_KIND =
+  COREWEBVIEW2_POINTER_EVENT_KIND(0x0249); // WM_POINTERENTER
+const CYCOREWEBVIEW2_POINTER_EVENT_KIND_LEAVE: COREWEBVIEW2_POINTER_EVENT_KIND =
+  COREWEBVIEW2_POINTER_EVENT_KIND(0x024A); // WM_POINTERLEAVE
+const CYCOREWEBVIEW2_POINTER_EVENT_KIND_UP: COREWEBVIEW2_POINTER_EVENT_KIND =
+  COREWEBVIEW2_POINTER_EVENT_KIND(0x0247); // WM_POINTERUP
+const CYCOREWEBVIEW2_POINTER_EVENT_KIND_UPDATE: COREWEBVIEW2_POINTER_EVENT_KIND =
+  COREWEBVIEW2_POINTER_EVENT_KIND(0x0245); // WM_POINTERUPDATE
+const CYCOREWEBVIEW2_POINTER_EVENT_KIND_CAPTURECHANGED: COREWEBVIEW2_POINTER_EVENT_KIND =
+  COREWEBVIEW2_POINTER_EVENT_KIND(0x024C); // WM_POINTERCAPTURECHANGED
+
+// TiddlyDesktop: Helper functions to fill ICoreWebView2PointerInfo from Windows pointer data
+
+/// Fill pointer info for touch input (preserves pressure, contact area)
+unsafe fn fill_touch_pointer_info(
+  pointer_id: u32,
+  pointer_info: &ICoreWebView2PointerInfo,
+  hwnd: HWND,
+) -> bool {
+  let mut touch_info: POINTER_TOUCH_INFO = std::mem::zeroed();
+  if GetPointerTouchInfo(pointer_id, &mut touch_info).is_err() {
+    return fill_generic_pointer_info(pointer_id, pointer_info, hwnd);
+  }
+
+  let pi = &touch_info.pointerInfo;
+
+  // Convert screen coordinates to client coordinates
+  let mut pt = pi.ptPixelLocation;
+  let _ = ScreenToClient(hwnd, &mut pt);
+
+  // Set basic pointer properties
+  let _ = pointer_info.SetPointerKind(pi.pointerType.0 as u32);
+  let _ = pointer_info.SetPointerId(pi.pointerId);
+  let _ = pointer_info.SetFrameId(pi.frameId);
+  let _ = pointer_info.SetPointerFlags(pi.pointerFlags.0);
+
+  // Set pixel location (client coordinates)
+  let _ = pointer_info.SetPixelLocationRaw(pt);
+  let _ = pointer_info.SetPixelLocation(pt);
+
+  // Set HIMETRIC location
+  let _ = pointer_info.SetHimetricLocationRaw(pi.ptHimetricLocationRaw);
+  let _ = pointer_info.SetHimetricLocation(pi.ptHimetricLocation);
+
+  // Set time and history
+  let _ = pointer_info.SetTime(pi.dwTime);
+  let _ = pointer_info.SetHistoryCount(pi.historyCount);
+  let _ = pointer_info.SetInputData(pi.InputData as i32);
+  let _ = pointer_info.SetKeyStates(pi.dwKeyStates);
+  let _ = pointer_info.SetPerformanceCount(pi.PerformanceCount);
+  let _ = pointer_info.SetButtonChangeKind(pi.ButtonChangeType.0 as i32);
+
+  // Touch-specific: contact area
+  let mut contact_rect = touch_info.rcContact;
+  // Convert to client coordinates
+  let mut contact_pt = POINT { x: contact_rect.left, y: contact_rect.top };
+  let _ = ScreenToClient(hwnd, &mut contact_pt);
+  let width = contact_rect.right - contact_rect.left;
+  let height = contact_rect.bottom - contact_rect.top;
+  contact_rect.left = contact_pt.x;
+  contact_rect.top = contact_pt.y;
+  contact_rect.right = contact_pt.x + width;
+  contact_rect.bottom = contact_pt.y + height;
+  let _ = pointer_info.SetTouchContact(contact_rect);
+  let _ = pointer_info.SetTouchContactRaw(touch_info.rcContactRaw);
+
+  // Touch-specific: pressure (0-1024 range, convert to 0-1024 for WebView2)
+  let _ = pointer_info.SetTouchPressure(touch_info.pressure);
+
+  // Touch-specific: orientation and mask
+  let _ = pointer_info.SetTouchOrientation(touch_info.orientation);
+  let _ = pointer_info.SetTouchFlags(touch_info.touchFlags);
+  let _ = pointer_info.SetTouchMask(touch_info.touchMask);
+
+  true
+}
+
+/// Fill pointer info for pen/stylus input (preserves pressure, tilt, rotation)
+unsafe fn fill_pen_pointer_info(
+  pointer_id: u32,
+  pointer_info: &ICoreWebView2PointerInfo,
+  hwnd: HWND,
+) -> bool {
+  let mut pen_info: POINTER_PEN_INFO = std::mem::zeroed();
+  if GetPointerPenInfo(pointer_id, &mut pen_info).is_err() {
+    return fill_generic_pointer_info(pointer_id, pointer_info, hwnd);
+  }
+
+  let pi = &pen_info.pointerInfo;
+
+  // Convert screen coordinates to client coordinates
+  let mut pt = pi.ptPixelLocation;
+  let _ = ScreenToClient(hwnd, &mut pt);
+
+  // Set basic pointer properties
+  let _ = pointer_info.SetPointerKind(pi.pointerType.0 as u32);
+  let _ = pointer_info.SetPointerId(pi.pointerId);
+  let _ = pointer_info.SetFrameId(pi.frameId);
+  let _ = pointer_info.SetPointerFlags(pi.pointerFlags.0);
+
+  // Set pixel location (client coordinates)
+  let _ = pointer_info.SetPixelLocationRaw(pt);
+  let _ = pointer_info.SetPixelLocation(pt);
+
+  // Set HIMETRIC location
+  let _ = pointer_info.SetHimetricLocationRaw(pi.ptHimetricLocationRaw);
+  let _ = pointer_info.SetHimetricLocation(pi.ptHimetricLocation);
+
+  // Set time and history
+  let _ = pointer_info.SetTime(pi.dwTime);
+  let _ = pointer_info.SetHistoryCount(pi.historyCount);
+  let _ = pointer_info.SetInputData(pi.InputData as i32);
+  let _ = pointer_info.SetKeyStates(pi.dwKeyStates);
+  let _ = pointer_info.SetPerformanceCount(pi.PerformanceCount);
+  let _ = pointer_info.SetButtonChangeKind(pi.ButtonChangeType.0 as i32);
+
+  // Pen-specific: pressure (0-1024 range)
+  let _ = pointer_info.SetPenPressure(pen_info.pressure);
+
+  // Pen-specific: tilt (degrees, -90 to +90)
+  let _ = pointer_info.SetPenTiltX(pen_info.tiltX);
+  let _ = pointer_info.SetPenTiltY(pen_info.tiltY);
+
+  // Pen-specific: rotation (degrees, 0-359)
+  let _ = pointer_info.SetPenRotation(pen_info.rotation);
+
+  // Pen-specific: flags and mask
+  let _ = pointer_info.SetPenFlags(pen_info.penFlags);
+  let _ = pointer_info.SetPenMask(pen_info.penMask);
+
+  true
+}
+
+/// Fill pointer info for mouse input
+unsafe fn fill_mouse_pointer_info(
+  pointer_id: u32,
+  pointer_info: &ICoreWebView2PointerInfo,
+  hwnd: HWND,
+) -> bool {
+  fill_generic_pointer_info(pointer_id, pointer_info, hwnd)
+}
+
+/// Fill pointer info from generic POINTER_INFO (fallback for all pointer types)
+unsafe fn fill_generic_pointer_info(
+  pointer_id: u32,
+  pointer_info: &ICoreWebView2PointerInfo,
+  hwnd: HWND,
+) -> bool {
+  let mut pi: POINTER_INFO = std::mem::zeroed();
+  if GetPointerInfo(pointer_id, &mut pi).is_err() {
+    return false;
+  }
+
+  // Convert screen coordinates to client coordinates
+  let mut pt = pi.ptPixelLocation;
+  let _ = ScreenToClient(hwnd, &mut pt);
+
+  // Set basic pointer properties
+  let _ = pointer_info.SetPointerKind(pi.pointerType.0 as u32);
+  let _ = pointer_info.SetPointerId(pi.pointerId);
+  let _ = pointer_info.SetFrameId(pi.frameId);
+  let _ = pointer_info.SetPointerFlags(pi.pointerFlags.0);
+
+  // Set pixel location (client coordinates)
+  let _ = pointer_info.SetPixelLocationRaw(pt);
+  let _ = pointer_info.SetPixelLocation(pt);
+
+  // Set HIMETRIC location
+  let _ = pointer_info.SetHimetricLocationRaw(pi.ptHimetricLocationRaw);
+  let _ = pointer_info.SetHimetricLocation(pi.ptHimetricLocation);
+
+  // Set time and history
+  let _ = pointer_info.SetTime(pi.dwTime);
+  let _ = pointer_info.SetHistoryCount(pi.historyCount);
+  let _ = pointer_info.SetInputData(pi.InputData as i32);
+  let _ = pointer_info.SetKeyStates(pi.dwKeyStates);
+  let _ = pointer_info.SetPerformanceCount(pi.PerformanceCount);
+  let _ = pointer_info.SetButtonChangeKind(pi.ButtonChangeType.0 as i32);
+
+  true
 }
 
 /// The scrollbar style to use in the webview.

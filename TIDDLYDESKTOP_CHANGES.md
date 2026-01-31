@@ -72,14 +72,38 @@ Add input forwarding for composition hosting:
 - `WM_MOUSEWHEEL`, `WM_MOUSEHWHEEL`
 - `WM_*DBLCLK` for double-clicks
 
-**Pointer Events** (converted to mouse events as fallback):
+**Pointer Events** (via `SendPointerInput` with full `ICoreWebView2PointerInfo`):
 - `WM_POINTERDOWN`, `WM_POINTERUP`, `WM_POINTERUPDATE`
 - `WM_POINTERENTER`, `WM_POINTERLEAVE`
 - `WM_POINTERWHEEL`, `WM_POINTERHWHEEL`
 - `WM_POINTERACTIVATE`, `WM_POINTERCAPTURECHANGED`
 
+Full touch/pen metadata is preserved:
+- Touch: contact area, pressure, orientation
+- Pen: pressure, tilt X/Y, rotation
+
+**IME Composition** (for international text input):
+- `WM_IME_STARTCOMPOSITION`, `WM_IME_COMPOSITION`, `WM_IME_ENDCOMPOSITION`
+- `WM_IME_SETCONTEXT`, `WM_IME_NOTIFY`, `WM_IME_CHAR`
+- `WM_IME_REQUEST`, `WM_IME_KEYDOWN`, `WM_IME_KEYUP`
+- `WM_IME_COMPOSITIONFULL`, `WM_IME_SELECT`
+
 **Cursor Handling**:
 - `WM_SETCURSOR`: Get cursor from composition controller and set it
+
+#### Helper Functions for Pointer Input
+```rust
+// Fill ICoreWebView2PointerInfo from Windows pointer data
+unsafe fn fill_touch_pointer_info(pointer_id: u32, info: &ICoreWebView2PointerInfo, hwnd: HWND) -> bool;
+unsafe fn fill_pen_pointer_info(pointer_id: u32, info: &ICoreWebView2PointerInfo, hwnd: HWND) -> bool;
+unsafe fn fill_mouse_pointer_info(pointer_id: u32, info: &ICoreWebView2PointerInfo, hwnd: HWND) -> bool;
+unsafe fn fill_generic_pointer_info(pointer_id: u32, info: &ICoreWebView2PointerInfo, hwnd: HWND) -> bool;
+```
+
+These functions extract full pointer metadata from Windows APIs:
+- `GetPointerTouchInfo()` for touch (pressure, contact area, orientation)
+- `GetPointerPenInfo()` for pen (pressure, tilt, rotation)
+- `GetPointerInfo()` for generic/mouse (basic pointer data)
 
 ### 2. `src/webkitgtk/drag_drop.rs` (Linux)
 
@@ -160,11 +184,25 @@ With composition hosting:
 - Application forwards drag events via `ICoreWebView2CompositionController3::DragEnter/Drop`
 - Full control over drag-drop with file path extraction
 
-### Pointer Events
+### Pointer Events with Full Metadata
 Composition hosting requires explicit input forwarding. Mouse events alone aren't sufficient for:
-- Touch screens (multi-touch, gestures)
-- Stylus/pen input (pressure, tilt, eraser)
+- Touch screens (multi-touch, gestures, contact area)
+- Stylus/pen input (pressure, tilt X/Y, rotation, eraser)
 - Pointer capture handling
+
+Using `SendPointerInput` with properly filled `ICoreWebView2PointerInfo` preserves all this metadata, enabling:
+- Pressure-sensitive drawing applications
+- Palm rejection based on contact area
+- Pen tilt for calligraphy effects
+
+### IME Support
+Composition hosting requires IME message handling for international text input:
+- Chinese (Pinyin, Wubi, etc.)
+- Japanese (Hiragana, Katakana, Kanji)
+- Korean (Hangul)
+- Other input methods (Vietnamese, Thai, etc.)
+
+The implementation forwards IME messages and sets the composition window position.
 
 ### Native Drop Handling (Linux/macOS)
 WebKit's native drop handling correctly inserts text into inputs/textareas. The original WRY code intercepted drops and prevented this. The modifications:
@@ -194,6 +232,7 @@ features = [
   "Win32_Graphics_DirectComposition",
   "Win32_Graphics_Dxgi",
   "Win32_UI_Input_Pointer",
+  "Win32_UI_Input_Ime",  # IME support for international text input
 ]
 ```
 

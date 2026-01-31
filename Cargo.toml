@@ -98,6 +98,8 @@ features = [
   "Win32_UI_Input_KeyboardAndMouse",
   # TiddlyDesktop: Pointer events for touch/pen support
   "Win32_UI_Input_Pointer",
+  # TiddlyDesktop: IME support for international text input
+  "Win32_UI_Input_Ime",
 ]
 
 [target.'cfg(target_vendor = "apple")'.dependencies]
