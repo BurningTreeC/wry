@@ -389,6 +389,8 @@ impl InnerWebView {
     webview2_com::wait_with_pump(rx)?.map_err(Into::into)
   }
 
+  // TiddlyDesktop: Keep original controller creation for potential fallback
+  #[allow(dead_code)]
   #[inline]
   fn create_controller(
     hwnd: HWND,

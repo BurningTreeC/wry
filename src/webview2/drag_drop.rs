@@ -35,11 +35,15 @@ use windows::{
   },
 };
 
+// TiddlyDesktop: DragDropController not used with composition hosting mode
+// but kept for potential fallback to windowed mode
+#[allow(dead_code)]
 #[derive(Default)]
 pub(crate) struct DragDropController {
   drop_targets: Vec<IDropTarget>,
 }
 
+#[allow(dead_code)]
 impl DragDropController {
   #[inline]
   pub(crate) fn new(hwnd: HWND, handler: Box<dyn Fn(DragDropEvent) -> bool>) -> Self {
