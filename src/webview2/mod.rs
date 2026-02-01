@@ -1751,9 +1751,12 @@ impl InnerWebView {
 
     // TiddlyDesktop: Keyboard event handling
     // In composition hosting mode, keyboard events need to be forwarded to WebView2's
-    // focused window. After MoveFocus, GetFocus() returns the HWND that should receive
-    // keyboard messages. We use SendMessage (synchronous) instead of PostMessage to ensure
+    // focused window. We use SendMessage (synchronous) instead of PostMessage to ensure
     // proper keyboard event ordering.
+    //
+    // IMPORTANT: We check if WebView2 already has focus BEFORE calling MoveFocus.
+    // Calling MoveFocus unnecessarily can interfere with modifier key state tracking,
+    // causing issues with multi-modifier shortcuts like Ctrl+Shift+S or Shift+Alt+S.
     // Only forward from container subclass
     match msg {
       WM_KEYDOWN | WM_KEYUP | WM_CHAR | WM_DEADCHAR |
@@ -1761,18 +1764,26 @@ impl InnerWebView {
       WM_UNICHAR => {
         if is_container_subclass && dwrefdata != 0 {
           let controller = dwrefdata as *mut ICoreWebView2Controller;
-          // Ensure WebView2 has focus
-          let _ = (*controller).MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
 
-          // After MoveFocus, GetFocus() returns WebView2's internal focused window
-          // This is more reliable than searching for Chrome_WidgetWin as a child
+          // First check if WebView2's internal window already has focus
+          // This avoids calling MoveFocus unnecessarily which can disrupt key state
           let focused_hwnd = GetFocus();
-          if !focused_hwnd.is_invalid() && focused_hwnd != hwnd {
-            // Forward the keyboard message to the focused window using SendMessage
-            // SendMessage is synchronous which ensures proper event ordering for
-            // keyboard shortcuts like Ctrl+S, Ctrl+B, etc.
+
+          // If focus is not yet on a WebView2 internal window (or is on the container),
+          // then we need to call MoveFocus to transfer focus
+          if focused_hwnd.is_invalid() || focused_hwnd == hwnd {
+            let _ = (*controller).MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
+            // Update focused_hwnd after MoveFocus
+            let focused_hwnd = GetFocus();
+            if !focused_hwnd.is_invalid() && focused_hwnd != hwnd {
+              let _ = SendMessageW(focused_hwnd, msg, Some(wparam), Some(lparam));
+              return LRESULT(0);
+            }
+          } else {
+            // Focus is already on WebView2's internal window - just forward the message
+            // This path preserves modifier key state correctly for multi-modifier shortcuts
             let _ = SendMessageW(focused_hwnd, msg, Some(wparam), Some(lparam));
-            return LRESULT(0); // Message handled
+            return LRESULT(0);
           }
         }
         // Fall through to DefSubclassProc if no focused window found
