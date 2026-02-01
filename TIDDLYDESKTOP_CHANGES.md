@@ -191,6 +191,27 @@ Key changes:
 
 This enables TiddlyDesktop to receive file paths via Tauri's `onDragDropEvent` while HTML5 drag events still work in the WebView.
 
+#### Internal Drag Detection via FFI
+To distinguish internal drags (from within WebView2) from external drags, the module uses FFI functions defined in TiddlyDesktop:
+
+```rust
+extern "C" {
+  fn tiddlydesktop_has_internal_drag() -> i32;
+  fn tiddlydesktop_is_text_selection_drag() -> i32;
+  fn tiddlydesktop_clear_internal_drag();
+}
+```
+
+When an internal drag is detected (via the `DragStarting` event in TiddlyDesktop):
+- **Tiddler/$draggable drags**: Skip listener AND forwarding to composition controller
+  - WebView2 handles these internally, no need to forward
+  - Don't activate external dropzone
+- **Text selection drags**: Proceed normally
+  - Forward to composition controller
+  - Activate external dropzone for pasting
+
+This prevents the dropzone from incorrectly activating when dragging tiddlers within the same wiki.
+
 #### New: `iterate_filenames_ref` helper
 Added a helper function that takes `&IDataObject` instead of `Ref<'_, IDataObject>`:
 ```rust

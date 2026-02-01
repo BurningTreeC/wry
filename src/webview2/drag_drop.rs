@@ -6,6 +6,31 @@
 
 use crate::DragDropEvent;
 
+// TiddlyDesktop: FFI functions for internal drag detection
+// These are defined in TiddlyDesktop's windows.rs and linked at build time.
+// They allow us to detect drags that started inside WebView2 vs external drags.
+extern "C" {
+  /// Returns 1 if there's an active internal drag from this WebView2, 0 otherwise.
+  fn tiddlydesktop_has_internal_drag() -> i32;
+  /// Returns 1 if the internal drag is a text selection drag (should activate dropzone), 0 otherwise.
+  fn tiddlydesktop_is_text_selection_drag() -> i32;
+  /// Clear the internal drag state (called on Drop or DragLeave).
+  fn tiddlydesktop_clear_internal_drag();
+}
+
+/// Check if we should skip calling the listener for this drag.
+/// Returns true if this is an internal tiddler/$draggable drag (NOT a text selection).
+/// In that case, we still forward to WebView2 but don't trigger the external dropzone.
+fn should_skip_listener() -> bool {
+  unsafe {
+    let has_internal = tiddlydesktop_has_internal_drag() != 0;
+    let is_text_selection = tiddlydesktop_is_text_selection_drag() != 0;
+    // Skip listener for internal drags that are NOT text selections
+    // Text selection drags should still activate the dropzone
+    has_internal && !is_text_selection
+  }
+}
+
 use std::{
   cell::UnsafeCell,
   ffi::OsString,
@@ -313,6 +338,12 @@ impl IDropTarget_Impl for CompositionDragDropTarget_Impl {
     let mut point = POINT { x: pt.x, y: pt.y };
     let _ = unsafe { ScreenToClient(self.hwnd, &mut point) };
 
+    // TiddlyDesktop: Check if this is an internal drag (started inside WebView2)
+    // For internal drags, WebView2 already handles the drag events internally,
+    // so we don't need to forward to the composition controller (that creates duplicates).
+    // We also skip the listener to avoid activating the external dropzone.
+    let skip_for_internal = should_skip_listener();
+
     // Get reference to data object (needed for both path extraction and forwarding)
     let data_obj = pDataObj.as_ref().expect("Received null IDataObject");
 
@@ -325,8 +356,8 @@ impl IDropTarget_Impl for CompositionDragDropTarget_Impl {
       *self.enter_is_valid.get() = enter_is_valid;
     }
 
-    // Call listener with Enter event (only if we have valid file paths)
-    if enter_is_valid {
+    // Call listener with Enter event (only if we have valid file paths and not internal tiddler drag)
+    if enter_is_valid && !skip_for_internal {
       (self.listener)(DragDropEvent::Enter {
         paths,
         position: (point.x as _, point.y as _),
@@ -334,25 +365,34 @@ impl IDropTarget_Impl for CompositionDragDropTarget_Impl {
     }
 
     // Forward to composition controller for HTML5 drag events
-    let mut effect = unsafe { (*pdwEffect).0 };
-    let _ = unsafe {
-      self.composition_controller.DragEnter(
-        data_obj,
-        grfKeyState.0 as u32,
-        point,
-        &mut effect,
-      )
-    };
+    // Skip for internal non-text-selection drags (WebView2 already handles those)
+    if !skip_for_internal {
+      let mut effect = unsafe { (*pdwEffect).0 };
+      let _ = unsafe {
+        self.composition_controller.DragEnter(
+          data_obj,
+          grfKeyState.0 as u32,
+          point,
+          &mut effect,
+        )
+      };
 
-    // Use composition controller's effect, but ensure copy is allowed for files
-    let cursor_effect = if enter_is_valid {
-      DROPEFFECT_COPY
+      // Use composition controller's effect, but ensure copy is allowed for files
+      let cursor_effect = if enter_is_valid {
+        DROPEFFECT_COPY
+      } else {
+        DROPEFFECT(effect)
+      };
+      unsafe {
+        (*pdwEffect) = cursor_effect;
+        *self.cursor_effect.get() = cursor_effect;
+      }
     } else {
-      DROPEFFECT(effect)
-    };
-    unsafe {
-      (*pdwEffect) = cursor_effect;
-      *self.cursor_effect.get() = cursor_effect;
+      // For internal drags, allow copy/move
+      unsafe {
+        (*pdwEffect) = DROPEFFECT_COPY;
+        *self.cursor_effect.get() = DROPEFFECT_COPY;
+      }
     }
 
     Ok(())
@@ -367,42 +407,59 @@ impl IDropTarget_Impl for CompositionDragDropTarget_Impl {
     let mut point = POINT { x: pt.x, y: pt.y };
     let _ = unsafe { ScreenToClient(self.hwnd, &mut point) };
 
-    // Call listener with Over event (only for file drags)
-    if unsafe { *self.enter_is_valid.get() } {
+    // TiddlyDesktop: Check if this is an internal drag
+    let skip_for_internal = should_skip_listener();
+
+    // Call listener with Over event (only for file drags and not internal tiddler drag)
+    if unsafe { *self.enter_is_valid.get() } && !skip_for_internal {
       (self.listener)(DragDropEvent::Over {
         position: (point.x as _, point.y as _),
       });
     }
 
-    // Forward to composition controller
-    let mut effect = unsafe { (*pdwEffect).0 };
-    let _ = unsafe {
-      self.composition_controller.DragOver(
-        grfKeyState.0 as u32,
-        point,
-        &mut effect,
-      )
-    };
+    // Forward to composition controller (skip for internal drags)
+    if !skip_for_internal {
+      let mut effect = unsafe { (*pdwEffect).0 };
+      let _ = unsafe {
+        self.composition_controller.DragOver(
+          grfKeyState.0 as u32,
+          point,
+          &mut effect,
+        )
+      };
 
-    // For file drags, use our cached DROPEFFECT_COPY
-    // For non-file drags (internal HTML5 drags), use composition controller's effect
-    if unsafe { *self.enter_is_valid.get() } {
-      unsafe { *pdwEffect = *self.cursor_effect.get() };
+      // For file drags, use our cached DROPEFFECT_COPY
+      // For non-file drags (internal HTML5 drags), use composition controller's effect
+      if unsafe { *self.enter_is_valid.get() } {
+        unsafe { *pdwEffect = *self.cursor_effect.get() };
+      } else {
+        unsafe { (*pdwEffect).0 = effect };
+      }
     } else {
-      unsafe { (*pdwEffect).0 = effect };
+      // For internal drags, keep using DROPEFFECT_COPY
+      unsafe { *pdwEffect = *self.cursor_effect.get() };
     }
 
     Ok(())
   }
 
   fn DragLeave(&self) -> windows::core::Result<()> {
-    // Call listener with Leave event
-    if unsafe { *self.enter_is_valid.get() } {
+    // TiddlyDesktop: Check if this is an internal drag
+    let skip_for_internal = should_skip_listener();
+
+    // Call listener with Leave event (if not internal tiddler drag)
+    if unsafe { *self.enter_is_valid.get() } && !skip_for_internal {
       (self.listener)(DragDropEvent::Leave);
     }
 
-    // Forward to composition controller
-    let _ = unsafe { self.composition_controller.DragLeave() };
+    // Forward to composition controller (skip for internal drags)
+    if !skip_for_internal {
+      let _ = unsafe { self.composition_controller.DragLeave() };
+    }
+
+    // TiddlyDesktop: Clear internal drag state
+    unsafe { tiddlydesktop_clear_internal_drag(); }
+
     Ok(())
   }
 
@@ -416,12 +473,16 @@ impl IDropTarget_Impl for CompositionDragDropTarget_Impl {
     let mut point = POINT { x: pt.x, y: pt.y };
     let _ = unsafe { ScreenToClient(self.hwnd, &mut point) };
 
+    // TiddlyDesktop: Check if this is an internal drag
+    let skip_for_internal = should_skip_listener();
+
     // Get reference to data object (needed for both path extraction and forwarding)
     let data_obj = pDataObj.as_ref().expect("Received null IDataObject");
 
     // Extract file paths and call listener BEFORE forwarding to WebView2
     // This ensures TiddlyDesktop has the paths available when the HTML5 drop event fires
-    if unsafe { *self.enter_is_valid.get() } {
+    // Skip for internal tiddler drags
+    if unsafe { *self.enter_is_valid.get() } && !skip_for_internal {
       let mut paths = Vec::new();
       let hdrop = unsafe { DragDropTarget::iterate_filenames_ref(data_obj, |path| paths.push(path)) };
 
@@ -436,17 +497,22 @@ impl IDropTarget_Impl for CompositionDragDropTarget_Impl {
       }
     }
 
-    // Forward to composition controller for HTML5 drop event
-    let mut effect = unsafe { (*pdwEffect).0 };
-    let _ = unsafe {
-      self.composition_controller.Drop(
-        data_obj,
-        grfKeyState.0 as u32,
-        point,
-        &mut effect,
-      )
-    };
-    unsafe { (*pdwEffect).0 = effect };
+    // Forward to composition controller for HTML5 drop event (skip for internal drags)
+    if !skip_for_internal {
+      let mut effect = unsafe { (*pdwEffect).0 };
+      let _ = unsafe {
+        self.composition_controller.Drop(
+          data_obj,
+          grfKeyState.0 as u32,
+          point,
+          &mut effect,
+        )
+      };
+      unsafe { (*pdwEffect).0 = effect };
+    }
+
+    // TiddlyDesktop: Clear internal drag state
+    unsafe { tiddlydesktop_clear_internal_drag(); }
 
     Ok(())
   }
