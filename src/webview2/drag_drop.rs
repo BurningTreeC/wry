@@ -34,16 +34,12 @@ fn should_skip_listener() -> bool {
 }
 
 /// Check if we should skip forwarding to composition controller.
-/// Returns true ONLY for tiddler/$draggable drags (fully handled by internal_drag.js).
-/// Link drags and text selection drags still need to be forwarded to WebView2.
+/// Currently always returns false - we need to forward ALL drags so that
+/// WebView2 fires the HTML5 drag events (dragenter/dragover/drop).
+/// Without forwarding, $droppable widgets won't receive drop events.
 fn should_skip_forwarding() -> bool {
-  unsafe {
-    let has_internal = tiddlydesktop_has_internal_drag() != 0;
-    let is_tiddler = tiddlydesktop_is_tiddler_drag() != 0;
-    // Only skip forwarding for tiddler drags - they are fully handled by JS
-    // Link drags need native forwarding for proper handling
-    has_internal && is_tiddler
-  }
+  // Never skip forwarding - HTML5 drag events are needed for $droppable to work
+  false
 }
 
 use std::{
