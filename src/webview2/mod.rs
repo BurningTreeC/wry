@@ -32,7 +32,7 @@ use windows::{
     UI::{
       Input::{
         Ime::{ImmGetContext, ImmReleaseContext, ImmSetCompositionWindow, COMPOSITIONFORM, CFS_POINT},
-        KeyboardAndMouse::{SetFocus, TrackMouseEvent, TRACKMOUSEEVENT, TME_LEAVE},
+        KeyboardAndMouse::{GetFocus, SetFocus, TrackMouseEvent, TRACKMOUSEEVENT, TME_LEAVE},
         // TiddlyDesktop: Pointer events for touch/pen support with full touch/pen info
         Pointer::{
           GetPointerInfo, GetPointerPenInfo, GetPointerTouchInfo, GetPointerType,
@@ -1750,8 +1750,10 @@ impl InnerWebView {
     }
 
     // TiddlyDesktop: Keyboard event handling
-    // In composition hosting mode, keyboard events need to be forwarded to the WebView2's
-    // internal Chrome_WidgetWin window for processing
+    // In composition hosting mode, keyboard events need to be forwarded to WebView2's
+    // focused window. After MoveFocus, GetFocus() returns the HWND that should receive
+    // keyboard messages. We use SendMessage (synchronous) instead of PostMessage to ensure
+    // proper keyboard event ordering.
     // Only forward from container subclass
     match msg {
       WM_KEYDOWN | WM_KEYUP | WM_CHAR | WM_DEADCHAR |
@@ -1762,36 +1764,18 @@ impl InnerWebView {
           // Ensure WebView2 has focus
           let _ = (*controller).MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
 
-          // Find Chrome_WidgetWin child and forward keyboard messages
-          // WebView2 creates these windows even in composition mode for input handling
-          unsafe extern "system" fn find_chrome_widget(child: HWND, lparam: LPARAM) -> BOOL {
-            let mut class_name = [0u16; 256];
-            let len = GetClassNameW(child, &mut class_name);
-            if len > 0 {
-              let name = String::from_utf16_lossy(&class_name[..len as usize]);
-              if name.starts_with("Chrome_WidgetWin") {
-                let result = lparam.0 as *mut HWND;
-                *result = child;
-                return BOOL(0); // Stop enumeration
-              }
-            }
-            BOOL(1) // Continue
-          }
-
-          let mut chrome_hwnd = HWND::default();
-          let _ = EnumChildWindows(
-            Some(hwnd),
-            Some(find_chrome_widget),
-            LPARAM(&mut chrome_hwnd as *mut HWND as isize),
-          );
-
-          if !chrome_hwnd.is_invalid() {
-            // Forward the keyboard message to Chrome_WidgetWin
-            let _ = PostMessageW(Some(chrome_hwnd), msg, wparam, lparam);
+          // After MoveFocus, GetFocus() returns WebView2's internal focused window
+          // This is more reliable than searching for Chrome_WidgetWin as a child
+          let focused_hwnd = GetFocus();
+          if !focused_hwnd.is_invalid() && focused_hwnd != hwnd {
+            // Forward the keyboard message to the focused window using SendMessage
+            // SendMessage is synchronous which ensures proper event ordering for
+            // keyboard shortcuts like Ctrl+S, Ctrl+B, etc.
+            let _ = SendMessageW(focused_hwnd, msg, Some(wparam), Some(lparam));
             return LRESULT(0); // Message handled
           }
         }
-        // Fall through to DefSubclassProc if Chrome_WidgetWin not found
+        // Fall through to DefSubclassProc if no focused window found
       }
       _ => {}
     }

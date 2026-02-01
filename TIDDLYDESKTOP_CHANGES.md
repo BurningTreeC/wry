@@ -95,7 +95,9 @@ Full touch/pen metadata is preserved:
 - `WM_KEYDOWN`, `WM_KEYUP`, `WM_CHAR`, `WM_DEADCHAR`
 - `WM_SYSKEYDOWN`, `WM_SYSKEYUP`, `WM_SYSCHAR`, `WM_SYSDEADCHAR`
 - `WM_UNICHAR` for Unicode input
-- Ensures WebView2 focus for keyboard input
+- Calls `MoveFocus` then uses `GetFocus()` to find WebView2's internal focused window
+- Forwards keyboard messages via `SendMessageW` (synchronous) for proper event ordering
+- This approach is more reliable than searching for Chrome_WidgetWin as a child window
 
 **Touch Gestures**:
 - `WM_GESTURE` - pinch-to-zoom, pan, rotate
