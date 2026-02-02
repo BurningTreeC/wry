@@ -9,6 +9,7 @@ use crate::DragDropEvent;
 // TiddlyDesktop: FFI functions for internal drag detection
 // These are defined in TiddlyDesktop's windows.rs and linked at build time.
 // They allow us to detect drags that started inside WebView2 vs external drags.
+#[allow(dead_code)]
 extern "C" {
   /// Returns 1 if there's an active internal drag from this WebView2, 0 otherwise.
   fn tiddlydesktop_has_internal_drag() -> i32;
@@ -18,6 +19,9 @@ extern "C" {
   fn tiddlydesktop_is_tiddler_drag() -> i32;
   /// Clear the internal drag state (called on Drop or DragLeave).
   fn tiddlydesktop_clear_internal_drag();
+  /// Returns 1 if cursor is over a $droppable widget, 0 otherwise.
+  /// Used to show correct cursor effect for internal drags.
+  fn tiddlydesktop_is_over_droppable() -> i32;
 }
 
 /// Check if we should skip calling the listener for this drag.
@@ -40,6 +44,12 @@ fn should_skip_listener() -> bool {
 fn should_skip_forwarding() -> bool {
   // Never skip forwarding - HTML5 drag events are needed for $droppable to work
   false
+}
+
+/// Check if cursor is over a $droppable widget.
+/// Used to determine cursor effect for internal drags.
+fn is_over_droppable() -> bool {
+  unsafe { tiddlydesktop_is_over_droppable() != 0 }
 }
 
 use std::{
@@ -389,9 +399,15 @@ impl IDropTarget_Impl for CompositionDragDropTarget_Impl {
         )
       };
 
-      // Use composition controller's effect, but ensure copy is allowed for files
+      // Determine cursor effect:
+      // - For external file drags (enter_is_valid): show COPY
+      // - For internal drags (skip_listener): show NONE unless over a $droppable
+      // - For other drags: use composition controller's effect
       let cursor_effect = if enter_is_valid {
         DROPEFFECT_COPY
+      } else if skip_listener {
+        // Internal tiddler/link drag - show "no drop" unless over a droppable
+        if is_over_droppable() { DROPEFFECT_COPY } else { DROPEFFECT_NONE }
       } else {
         DROPEFFECT(effect)
       };
@@ -400,10 +416,11 @@ impl IDropTarget_Impl for CompositionDragDropTarget_Impl {
         *self.cursor_effect.get() = cursor_effect;
       }
     } else {
-      // For tiddler drags (fully internal), allow copy/move
+      // For tiddler drags (fully internal), show "no drop" unless over a droppable
+      let cursor_effect = if is_over_droppable() { DROPEFFECT_COPY } else { DROPEFFECT_NONE };
       unsafe {
-        (*pdwEffect) = DROPEFFECT_COPY;
-        *self.cursor_effect.get() = DROPEFFECT_COPY;
+        (*pdwEffect) = cursor_effect;
+        *self.cursor_effect.get() = cursor_effect;
       }
     }
 
@@ -441,16 +458,29 @@ impl IDropTarget_Impl for CompositionDragDropTarget_Impl {
         )
       };
 
-      // For file drags, use our cached DROPEFFECT_COPY
-      // For non-file drags (internal HTML5 drags), use composition controller's effect
+      // Determine cursor effect:
+      // - For external file drags (enter_is_valid): use cached COPY
+      // - For internal drags (skip_listener): NONE unless over a $droppable
+      // - For other drags: use composition controller's effect
       if unsafe { *self.enter_is_valid.get() } {
         unsafe { *pdwEffect = *self.cursor_effect.get() };
+      } else if skip_listener {
+        // Internal tiddler/link drag - update cursor based on droppable state
+        let cursor_effect = if is_over_droppable() { DROPEFFECT_COPY } else { DROPEFFECT_NONE };
+        unsafe {
+          *pdwEffect = cursor_effect;
+          *self.cursor_effect.get() = cursor_effect;
+        }
       } else {
         unsafe { (*pdwEffect).0 = effect };
       }
     } else {
-      // For tiddler drags (fully internal), keep using DROPEFFECT_COPY
-      unsafe { *pdwEffect = *self.cursor_effect.get() };
+      // For tiddler drags (fully internal), show "no drop" unless over a droppable
+      let cursor_effect = if is_over_droppable() { DROPEFFECT_COPY } else { DROPEFFECT_NONE };
+      unsafe {
+        *pdwEffect = cursor_effect;
+        *self.cursor_effect.get() = cursor_effect;
+      };
     }
 
     Ok(())
