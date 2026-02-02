@@ -813,6 +813,149 @@ impl InnerWebView {
       }
     }
 
+    // TiddlyDesktop: AcceleratorKeyPressed handler for multi-modifier shortcuts
+    // In composition hosting mode, multi-modifier combos (Ctrl+Alt+N, Shift+Alt+S) don't
+    // work correctly because the modifier state isn't properly passed to JavaScript.
+    // We intercept these in AcceleratorKeyPressed, read the actual modifier state via
+    // GetKeyState, and dispatch synthetic JavaScript keyboard events with correct modifiers.
+    unsafe {
+      let webview_clone = webview.clone();
+      let mut accel_token = EventRegistrationToken::default();
+      controller.add_AcceleratorKeyPressed(
+        &AcceleratorKeyPressedEventHandler::create(Box::new(move |_, args| {
+          let Some(args) = args else { return Ok(()) };
+
+          // Only handle KeyDown and SystemKeyDown (Alt combos)
+          let mut kind = COREWEBVIEW2_KEY_EVENT_KIND::default();
+          args.KeyEventKind(&mut kind)?;
+          if kind != COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN &&
+             kind != COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN {
+            return Ok(());
+          }
+
+          // Get the virtual key code
+          let mut vk: u32 = 0;
+          args.VirtualKey(&mut vk)?;
+
+          // Use GetKeyState to read actual OS modifier state
+          // This is the recommended approach per WebView2 docs
+          const VK_CONTROL: i32 = 0x11;
+          const VK_MENU: i32 = 0x12;    // Alt
+          const VK_SHIFT: i32 = 0x10;
+          const VK_LWIN: i32 = 0x5B;    // Left Windows/Meta key
+          const VK_RWIN: i32 = 0x5C;    // Right Windows/Meta key
+
+          #[link(name = "user32")]
+          extern "system" {
+            fn GetKeyState(nVirtKey: i32) -> i16;
+          }
+
+          let ctrl = (GetKeyState(VK_CONTROL) & 0x8000u16 as i16) != 0;
+          let alt = (GetKeyState(VK_MENU) & 0x8000u16 as i16) != 0;
+          let shift = (GetKeyState(VK_SHIFT) & 0x8000u16 as i16) != 0;
+          let meta = (GetKeyState(VK_LWIN) & 0x8000u16 as i16) != 0 ||
+                     (GetKeyState(VK_RWIN) & 0x8000u16 as i16) != 0;
+
+          // Count modifiers - only handle multi-modifier combos
+          let modifier_count = ctrl as u8 + alt as u8 + shift as u8 + meta as u8;
+          if modifier_count < 2 {
+            // Single or no modifier - let normal handling proceed
+            return Ok(());
+          }
+
+          // Skip if the key itself is a modifier
+          if vk == VK_CONTROL as u32 || vk == VK_MENU as u32 || vk == VK_SHIFT as u32 ||
+             vk == VK_LWIN as u32 || vk == VK_RWIN as u32 ||
+             vk == 0xA0 || vk == 0xA1 || // VK_LSHIFT, VK_RSHIFT
+             vk == 0xA2 || vk == 0xA3 || // VK_LCONTROL, VK_RCONTROL
+             vk == 0xA4 || vk == 0xA5 {  // VK_LMENU, VK_RMENU
+            return Ok(());
+          }
+
+          // Convert virtual key to JavaScript key name
+          let key_name = match vk {
+            0x41..=0x5A => {
+              // A-Z keys - return lowercase letter
+              let c = ((vk as u8) + 32) as char;
+              format!("{}", c)
+            }
+            0x30..=0x39 => format!("{}", (vk - 0x30)), // 0-9 keys
+            0x70..=0x7B => format!("F{}", vk - 0x6F),  // F1-F12
+            0x20 => " ".to_string(),
+            0x0D => "Enter".to_string(),
+            0x1B => "Escape".to_string(),
+            0x09 => "Tab".to_string(),
+            0x08 => "Backspace".to_string(),
+            0x2E => "Delete".to_string(),
+            0x2D => "Insert".to_string(),
+            0x24 => "Home".to_string(),
+            0x23 => "End".to_string(),
+            0x21 => "PageUp".to_string(),
+            0x22 => "PageDown".to_string(),
+            0x25 => "ArrowLeft".to_string(),
+            0x26 => "ArrowUp".to_string(),
+            0x27 => "ArrowRight".to_string(),
+            0x28 => "ArrowDown".to_string(),
+            0xBF => "/".to_string(),
+            0xDC => "\\".to_string(),
+            0xBD => "-".to_string(),
+            0xBB => "=".to_string(),
+            0xDB => "[".to_string(),
+            0xDD => "]".to_string(),
+            0xBA => ";".to_string(),
+            0xDE => "'".to_string(),
+            0xBC => ",".to_string(),
+            0xBE => ".".to_string(),
+            0xC0 => "`".to_string(),
+            _ => return Ok(()), // Unknown key, let normal handling proceed
+          };
+
+          // Generate the code value (e.g., "KeyN" for 'n', "Digit1" for '1')
+          let code = match vk {
+            0x41..=0x5A => format!("Key{}", (vk as u8) as char),
+            0x30..=0x39 => format!("Digit{}", vk - 0x30),
+            0x70..=0x7B => format!("F{}", vk - 0x6F),
+            _ => key_name.clone(),
+          };
+
+          // Dispatch synthetic JavaScript keydown event with correct modifiers
+          let js = format!(
+            r#"(function() {{
+              var event = new KeyboardEvent('keydown', {{
+                key: '{}',
+                code: '{}',
+                keyCode: {},
+                which: {},
+                ctrlKey: {},
+                altKey: {},
+                shiftKey: {},
+                metaKey: {},
+                bubbles: true,
+                cancelable: true
+              }});
+              document.activeElement.dispatchEvent(event);
+            }})();"#,
+            key_name,
+            code,
+            vk,
+            vk,
+            ctrl,
+            alt,
+            shift,
+            meta
+          );
+
+          let _ = webview_clone.ExecuteScript(&HSTRING::from(js), None);
+
+          // Mark as handled to prevent the malformed event from reaching JavaScript
+          args.SetHandled(true)?;
+
+          Ok(())
+        })),
+        &mut accel_token,
+      )?;
+    }
+
     // Extension loading
     if pl_attrs.browser_extensions_enabled {
       if let Some(extension_path) = pl_attrs.extension_path {
