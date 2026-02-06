@@ -48,6 +48,9 @@ fn should_skip_forwarding() -> bool {
 
 /// Check if cursor is over a $droppable widget.
 /// Used to determine cursor effect for internal drags.
+/// NOTE: Currently unused - we let WebView2 determine the drop effect instead,
+/// which is more reliable since it knows about HTML5 drop targets.
+#[allow(dead_code)]
 fn is_over_droppable() -> bool {
   unsafe { tiddlydesktop_is_over_droppable() != 0 }
 }
@@ -401,14 +404,16 @@ impl IDropTarget_Impl for CompositionDragDropTarget_Impl {
 
       // Determine cursor effect:
       // - For external file drags (enter_is_valid): show COPY
-      // - For internal drags (skip_listener): show NONE unless over a $droppable
+      // - For internal drags (skip_listener): always COPY (JS handles drop acceptance)
       // - For other drags: use composition controller's effect
       let cursor_effect = if enter_is_valid {
         DROPEFFECT_COPY
       } else if skip_listener {
-        // Internal tiddler/link drag - show "no drop" unless over a droppable
-        if is_over_droppable() { DROPEFFECT_COPY } else { DROPEFFECT_NONE }
+        // For internal drags (tiddler/link), always allow dropping.
+        // The JS layer ($droppable) handles whether the drop is actually accepted.
+        DROPEFFECT_COPY
       } else {
+        // Let WebView2 determine the effect based on HTML5 drop targets
         DROPEFFECT(effect)
       };
       unsafe {
@@ -416,11 +421,12 @@ impl IDropTarget_Impl for CompositionDragDropTarget_Impl {
         *self.cursor_effect.get() = cursor_effect;
       }
     } else {
-      // For tiddler drags (fully internal), show "no drop" unless over a droppable
-      let cursor_effect = if is_over_droppable() { DROPEFFECT_COPY } else { DROPEFFECT_NONE };
+      // For tiddler drags (fully internal, skip_forwarding=true), we still need to
+      // allow drops on $droppable widgets. Use COPY effect to permit dropping.
+      // The JS layer ($droppable) handles whether the drop is actually accepted.
       unsafe {
-        (*pdwEffect) = cursor_effect;
-        *self.cursor_effect.get() = cursor_effect;
+        (*pdwEffect) = DROPEFFECT_COPY;
+        *self.cursor_effect.get() = DROPEFFECT_COPY;
       }
     }
 
@@ -460,26 +466,25 @@ impl IDropTarget_Impl for CompositionDragDropTarget_Impl {
 
       // Determine cursor effect:
       // - For external file drags (enter_is_valid): use cached COPY
-      // - For internal drags (skip_listener): NONE unless over a $droppable
+      // - For internal drags (skip_listener): always COPY (JS handles drop acceptance)
       // - For other drags: use composition controller's effect
       if unsafe { *self.enter_is_valid.get() } {
         unsafe { *pdwEffect = *self.cursor_effect.get() };
       } else if skip_listener {
-        // Internal tiddler/link drag - update cursor based on droppable state
-        let cursor_effect = if is_over_droppable() { DROPEFFECT_COPY } else { DROPEFFECT_NONE };
-        unsafe {
-          *pdwEffect = cursor_effect;
-          *self.cursor_effect.get() = cursor_effect;
-        }
+        // For internal drags (tiddler/link), always allow dropping.
+        // The JS layer ($droppable) handles whether the drop is actually accepted.
+        unsafe { *pdwEffect = DROPEFFECT_COPY };
       } else {
+        // Let WebView2 determine the effect based on HTML5 drop targets
         unsafe { (*pdwEffect).0 = effect };
       }
     } else {
-      // For tiddler drags (fully internal), show "no drop" unless over a droppable
-      let cursor_effect = if is_over_droppable() { DROPEFFECT_COPY } else { DROPEFFECT_NONE };
+      // For tiddler drags (fully internal, skip_forwarding=true), we still need to
+      // allow drops on $droppable widgets. Use COPY effect to permit dropping.
+      // The JS layer ($droppable) handles whether the drop is actually accepted.
       unsafe {
-        *pdwEffect = cursor_effect;
-        *self.cursor_effect.get() = cursor_effect;
+        *pdwEffect = DROPEFFECT_COPY;
+        *self.cursor_effect.get() = DROPEFFECT_COPY;
       };
     }
 
