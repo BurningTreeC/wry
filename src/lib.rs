@@ -2232,6 +2232,10 @@ pub trait WebViewExtWindows {
   /// Returns the WebView2 controller.
   fn controller(&self) -> ICoreWebView2Controller;
 
+  /// Returns the WebView2 composition controller, if composition hosting is enabled.
+  /// TiddlyDesktop uses composition hosting for full input/drag-drop control.
+  fn composition_controller(&self) -> Option<webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2CompositionController>;
+
   /// Webview environment.
   fn environment(&self) -> ICoreWebView2Environment;
 
@@ -2266,6 +2270,10 @@ pub trait WebViewExtWindows {
 impl WebViewExtWindows for WebView {
   fn controller(&self) -> ICoreWebView2Controller {
     self.webview.controller.clone()
+  }
+
+  fn composition_controller(&self) -> Option<webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2CompositionController> {
+    self.webview.composition_controller().cloned()
   }
 
   fn environment(&self) -> ICoreWebView2Environment {
