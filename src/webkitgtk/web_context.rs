@@ -133,15 +133,16 @@ impl WebContextExt for super::WebContext {
   {
     self.register_custom_protocol(name.to_owned())?;
 
-    // Enable secure context and local scheme (allows loading http:// from custom schemes
-    // without mixed-content blocking, needed for localhost media server on Linux)
+    // Register as local + CORS-enabled scheme.
+    // NOT registering as "secure" so that loading http://127.0.0.1 from custom scheme
+    // pages is not treated as mixed content (needed for localhost media server on Linux).
     let security_manager = self
       .os
       .context
       .security_manager()
       .ok_or(Error::MissingManager)?;
-    security_manager.register_uri_scheme_as_secure(name);
     security_manager.register_uri_scheme_as_local(name);
+    security_manager.register_uri_scheme_as_cors_enabled(name);
 
     self.os.context.register_uri_scheme(name, move |request| {
       #[cfg(feature = "tracing")]
