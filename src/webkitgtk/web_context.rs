@@ -133,13 +133,15 @@ impl WebContextExt for super::WebContext {
   {
     self.register_custom_protocol(name.to_owned())?;
 
-    // Enable secure context
-    self
+    // Enable secure context and local scheme (allows loading http:// from custom schemes
+    // without mixed-content blocking, needed for localhost media server on Linux)
+    let security_manager = self
       .os
       .context
       .security_manager()
-      .ok_or(Error::MissingManager)?
-      .register_uri_scheme_as_secure(name);
+      .ok_or(Error::MissingManager)?;
+    security_manager.register_uri_scheme_as_secure(name);
+    security_manager.register_uri_scheme_as_local(name);
 
     self.os.context.register_uri_scheme(name, move |request| {
       #[cfg(feature = "tracing")]

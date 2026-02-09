@@ -350,6 +350,42 @@ impl InnerWebView {
         }
       }
 
+      // TiddlyDesktop: Allow window resize by making the container transparent to
+      // hit-testing near the parent window's edges. Without this, the child container
+      // covers the resize border area and returns HTCLIENT, preventing resize cursors.
+      const WM_NCHITTEST: u32 = 0x0084;
+      const HTTRANSPARENT: isize = -1;
+      if msg == WM_NCHITTEST {
+        let parent = GetParent(hwnd);
+        if let Some(parent) = parent {
+          // Don't intercept when parent is maximized (no resize borders)
+          let style = GetWindowLongW(parent, GWL_STYLE) as u32;
+          if style & WS_MAXIMIZE.0 == 0 {
+            let mut client_rect = RECT::default();
+            if GetClientRect(parent, &mut client_rect).is_ok() {
+              // Convert screen coords to parent client coords
+              let mut pt = POINT {
+                x: (lparam.0 & 0xFFFF) as i16 as i32,
+                y: ((lparam.0 >> 16) & 0xFFFF) as i16 as i32,
+              };
+              let _ = ScreenToClient(parent, &mut pt);
+
+              // Resize border width: frame + padding
+              let border = GetSystemMetrics(SM_CXSIZEFRAME)
+                + GetSystemMetrics(SM_CXPADDEDBORDER);
+
+              if pt.x < border
+                || pt.x >= client_rect.right - border
+                || pt.y < border
+                || pt.y >= client_rect.bottom - border
+              {
+                return LRESULT(HTTRANSPARENT);
+              }
+            }
+          }
+        }
+      }
+
       DefWindowProcW(hwnd, msg, wparam, lparam)
     }
 
