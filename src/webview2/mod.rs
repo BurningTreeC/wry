@@ -1836,51 +1836,55 @@ impl InnerWebView {
       TD_WM_SETCURSOR => {
         // TiddlyDesktop: Handle cursor for composition hosting mode
         // In composition hosting, WebView2 doesn't have its own HWND, so we must handle cursors
-        // Only handle on container subclass
-        let mut cursor_set = false;
-        if is_container_subclass && dwrefdata != 0 {
-          let controller = dwrefdata as *mut ICoreWebView2Controller;
-          if let Ok(comp_ctrl) = (*controller).cast::<ICoreWebView2CompositionController>() {
-            let mut cursor = HCURSOR::default();
-            if comp_ctrl.Cursor(&mut cursor).is_ok() && !cursor.is_invalid() {
-              SetCursor(Some(cursor));
-              cursor_set = true;
-            } else {
-              // Try SystemCursorId as fallback
-              let mut cursor_id = 0u32;
-              if comp_ctrl.SystemCursorId(&mut cursor_id).is_ok() && cursor_id != 0 {
-                let cursor_name = match cursor_id {
-                  32512 => IDC_ARROW,
-                  32513 => IDC_IBEAM,
-                  32514 => IDC_WAIT,
-                  32515 => IDC_CROSS,
-                  32516 => IDC_UPARROW,
-                  32642 => IDC_SIZENWSE,
-                  32643 => IDC_SIZENESW,
-                  32644 => IDC_SIZEWE,
-                  32645 => IDC_SIZENS,
-                  32646 => IDC_SIZEALL,
-                  32648 => IDC_NO,
-                  32649 => IDC_HAND,
-                  32650 => IDC_APPSTARTING,
-                  32651 => IDC_HELP,
-                  _ => IDC_ARROW,
-                };
-                if let Ok(sys_cursor) = LoadCursorW(None, cursor_name) {
-                  SetCursor(Some(sys_cursor));
-                  cursor_set = true;
+        // Only handle on container subclass — let parent fall through to DefSubclassProc
+        // so Windows can set resize cursors (SIZEWE, SIZENS, etc.) for window borders
+        if is_container_subclass {
+          let mut cursor_set = false;
+          if dwrefdata != 0 {
+            let controller = dwrefdata as *mut ICoreWebView2Controller;
+            if let Ok(comp_ctrl) = (*controller).cast::<ICoreWebView2CompositionController>() {
+              let mut cursor = HCURSOR::default();
+              if comp_ctrl.Cursor(&mut cursor).is_ok() && !cursor.is_invalid() {
+                SetCursor(Some(cursor));
+                cursor_set = true;
+              } else {
+                // Try SystemCursorId as fallback
+                let mut cursor_id = 0u32;
+                if comp_ctrl.SystemCursorId(&mut cursor_id).is_ok() && cursor_id != 0 {
+                  let cursor_name = match cursor_id {
+                    32512 => IDC_ARROW,
+                    32513 => IDC_IBEAM,
+                    32514 => IDC_WAIT,
+                    32515 => IDC_CROSS,
+                    32516 => IDC_UPARROW,
+                    32642 => IDC_SIZENWSE,
+                    32643 => IDC_SIZENESW,
+                    32644 => IDC_SIZEWE,
+                    32645 => IDC_SIZENS,
+                    32646 => IDC_SIZEALL,
+                    32648 => IDC_NO,
+                    32649 => IDC_HAND,
+                    32650 => IDC_APPSTARTING,
+                    32651 => IDC_HELP,
+                    _ => IDC_ARROW,
+                  };
+                  if let Ok(sys_cursor) = LoadCursorW(None, cursor_name) {
+                    SetCursor(Some(sys_cursor));
+                    cursor_set = true;
+                  }
                 }
               }
             }
           }
-        }
-        // Always set a default cursor if we couldn't get one from WebView2
-        if !cursor_set {
-          if let Ok(arrow) = LoadCursorW(None, IDC_ARROW) {
-            SetCursor(Some(arrow));
+          // Set a default cursor if we couldn't get one from WebView2
+          if !cursor_set {
+            if let Ok(arrow) = LoadCursorW(None, IDC_ARROW) {
+              SetCursor(Some(arrow));
+            }
           }
+          return LRESULT(1);
         }
-        return LRESULT(1); // Always indicate we handled cursor in composition mode
+        // Parent subclass: fall through to DefSubclassProc for proper resize cursors
       }
       _ => {}
     }
