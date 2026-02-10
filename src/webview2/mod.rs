@@ -357,7 +357,7 @@ impl InnerWebView {
       const HTTRANSPARENT: isize = -1;
       if msg == WM_NCHITTEST {
         let parent = GetParent(hwnd);
-        if let Some(parent) = parent {
+        if let Ok(parent) = parent {
           // Don't intercept when parent is maximized (no resize borders)
           let style = GetWindowLongW(parent, GWL_STYLE) as u32;
           if style & WS_MAXIMIZE.0 == 0 {
