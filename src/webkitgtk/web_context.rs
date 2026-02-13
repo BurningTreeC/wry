@@ -48,6 +48,11 @@ impl WebContextImpl {
         // (e.g. wikifile://) where the default NoThirdParty policy blocks them.
         cookie_manager.set_accept_policy(CookieAcceptPolicy::Always);
       }
+      // Disable Intelligent Tracking Prevention (ITP) so that third-party cookies
+      // from embedded content (SoundCloud, etc.) are not blocked or partitioned.
+      // Without this, ITP classifies embed domains as trackers and blocks their
+      // cookies, causing CAPTCHAs to reappear on every load.
+      data_manager.set_itp_enabled(false);
       context_builder = context_builder.website_data_manager(&data_manager);
     }
     let context = context_builder.build();
