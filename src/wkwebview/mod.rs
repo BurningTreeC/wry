@@ -293,6 +293,14 @@ impl InnerWebView {
         if set_result.is_err() {
           return Err(Error::UrlSchemeRegisterError(name));
         }
+
+        // Register scheme as secure so embedded content (YouTube, etc.) gets
+        // a secure ancestor context, enabling EME/DRM and valid Referer handling.
+        unsafe {
+          let pool = config.processPool();
+          let scheme_ns = NSString::from_str(&name);
+          let _: () = objc2::msg_send![&pool, _registerURLSchemeAsSecure: &*scheme_ns];
+        }
       }
 
       WEBVIEW_STATE
