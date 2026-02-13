@@ -137,9 +137,10 @@ impl WebContextExt for super::WebContext {
   {
     self.register_custom_protocol(name.to_owned())?;
 
-    // Register as local + CORS-enabled + secure scheme.
-    // Secure is needed so that embedded content (YouTube, etc.) gets a secure
-    // ancestor context, enabling EME/DRM and valid Referer handling.
+    // Register as local + CORS-enabled scheme.
+    // NOT registering as "secure" — that causes mixed content blocking when
+    // loading http://127.0.0.1 resources (needed for localhost media server).
+    // YouTube/SoundCloud embeds are handled via the embed proxy instead.
     let security_manager = self
       .os
       .context
@@ -147,7 +148,6 @@ impl WebContextExt for super::WebContext {
       .ok_or(Error::MissingManager)?;
     security_manager.register_uri_scheme_as_local(name);
     security_manager.register_uri_scheme_as_cors_enabled(name);
-    security_manager.register_uri_scheme_as_secure(name);
 
     self.os.context.register_uri_scheme(name, move |request| {
       #[cfg(feature = "tracing")]
