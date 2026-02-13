@@ -25,6 +25,12 @@ class RustWebView(context: Context, val initScripts: Array<String>, val id: Stri
         settings.mediaPlaybackRequiresUserGesture = false
         settings.javaScriptCanOpenWindowsAutomatically = true
 
+        // Accept third-party cookies. Required for embedded content like YouTube
+        // iframes to function when loaded from custom URI schemes or localhost.
+        val cookieManager = CookieManager.getInstance()
+        cookieManager.setAcceptCookie(true)
+        cookieManager.setAcceptThirdPartyCookies(this, true)
+
         if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
             isDocumentStartScriptEnabled = true
             for (script in initScripts) {

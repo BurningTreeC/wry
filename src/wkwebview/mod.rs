@@ -246,6 +246,14 @@ impl InnerWebView {
         data_store
       };
 
+      // Disable Intelligent Tracking Prevention (ITP) so that third-party cookies
+      // are allowed. Required for embedded content like YouTube iframes to function
+      // when loaded from custom URI schemes (e.g. wikifile://).
+      data_store.setValue_forKey(
+        Some(&NSNumber::new_bool(false)),
+        ns_string!("_resourceLoadStatisticsEnabled"),
+      );
+
       // Register Custom Protocols
       let mut protocol_ptrs = Vec::new();
       for (name, function) in attributes.custom_protocols {

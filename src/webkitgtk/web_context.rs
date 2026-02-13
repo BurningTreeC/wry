@@ -30,7 +30,7 @@ pub struct WebContextImpl {
 
 impl WebContextImpl {
   pub fn new(data_directory: Option<&Path>) -> Self {
-    use webkit2gtk::{CookieManagerExt, WebsiteDataManager, WebsiteDataManagerExt};
+    use webkit2gtk::{CookieAcceptPolicy, CookieManagerExt, WebsiteDataManager, WebsiteDataManagerExt};
     let mut context_builder = WebContext::builder();
     if let Some(data_directory) = data_directory {
       let data_manager = WebsiteDataManager::builder()
@@ -43,6 +43,10 @@ impl WebContextImpl {
           &data_directory.join("cookies").to_string_lossy(),
           CookiePersistentStorage::Text,
         );
+        // Accept all cookies including third-party. Required for embedded content
+        // like YouTube iframes to function when loaded from custom URI schemes
+        // (e.g. wikifile://) where the default NoThirdParty policy blocks them.
+        cookie_manager.set_accept_policy(CookieAcceptPolicy::Always);
       }
       context_builder = context_builder.website_data_manager(&data_manager);
     }
