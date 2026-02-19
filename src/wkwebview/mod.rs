@@ -249,10 +249,14 @@ impl InnerWebView {
       // Disable Intelligent Tracking Prevention (ITP) so that third-party cookies
       // are allowed. Required for embedded content like YouTube iframes to function
       // when loaded from custom URI schemes (e.g. wikifile://).
-      data_store.setValue_forKey(
-        Some(&NSNumber::new_bool(false)),
-        ns_string!("_resourceLoadStatisticsEnabled"),
-      );
+      // Wrapped in exception::catch because _resourceLoadStatisticsEnabled is a private
+      // API that may not exist on older macOS versions (e.g. Monterey 12.7).
+      let _ = objc2::exception::catch(AssertUnwindSafe(|| {
+        data_store.setValue_forKey(
+          Some(&NSNumber::new_bool(false)),
+          ns_string!("_resourceLoadStatisticsEnabled"),
+        );
+      }));
 
       // Register Custom Protocols
       let mut protocol_ptrs = Vec::new();
@@ -296,10 +300,14 @@ impl InnerWebView {
 
         // Register scheme as secure so embedded content (YouTube, etc.) gets
         // a secure ancestor context, enabling EME/DRM and valid Referer handling.
+        // Wrapped in exception::catch because _registerURLSchemeAsSecure: is a private
+        // API that may not exist on older macOS versions (e.g. Monterey 12.7).
         unsafe {
           let pool = config.processPool();
           let scheme_ns = NSString::from_str(&name);
-          let _: () = objc2::msg_send![&pool, _registerURLSchemeAsSecure: &*scheme_ns];
+          let _ = objc2::exception::catch(AssertUnwindSafe(|| {
+            let _: () = objc2::msg_send![&pool, _registerURLSchemeAsSecure: &*scheme_ns];
+          }));
         }
       }
 
