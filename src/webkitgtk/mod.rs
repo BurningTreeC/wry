@@ -35,7 +35,7 @@ use std::{
 #[cfg(any(debug_assertions, feature = "devtools"))]
 use webkit2gtk::WebInspectorExt;
 use webkit2gtk::{
-  AutoplayPolicy, CookieManagerExt, InputMethodContextExt, LoadEvent, NavigationPolicyDecision,
+  AutoplayPolicy, CookieManagerExt, LoadEvent, NavigationPolicyDecision,
   NavigationPolicyDecisionExt, NetworkProxyMode, NetworkProxySettings, PolicyDecisionType,
   PrintOperationExt, SettingsExt, URIRequest, URIRequestExt, UserContentInjectedFrames,
   UserContentManager, UserContentManagerExt, UserScript, UserScriptInjectionTime,
@@ -409,10 +409,15 @@ impl InnerWebView {
   }
 
   fn set_webview_settings(webview: &WebView, attributes: &WebViewAttributes) {
-    // Disable input preedit,fcitx input editor can anchor at edit cursor position
-    if let Some(input_context) = webview.input_method_context() {
-      input_context.set_enable_preedit(false);
-    }
+    // Deliberately do NOT disable the input method preedit here.
+    //
+    // This used to call `set_enable_preedit(false)` to keep the fcitx candidate
+    // window anchored at the caret (wry#955, tauri#5986), but that breaks
+    // composition for CJK input methods: with fcitx5 the user cannot type
+    // Chinese/Japanese/Korean in the webview at all, since keystrokes never
+    // reach a composing state. Current webkit2gtk (>= 2.50) positions the
+    // popup correctly without the workaround, so preedit is left at its
+    // default (enabled).
 
     // use system scrollbars
     if let Some(context) = webview.context() {
